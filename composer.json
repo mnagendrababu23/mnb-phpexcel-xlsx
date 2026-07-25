@@ -1,0 +1,22 @@
+{
+    "name": "mnb/mnb-phpexcel-xlsx",
+    "description": "Native XLSX reader/writer and low-memory streaming XLSX module for MNB PHPExcel.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "ext-zip": "*",
+        "ext-xmlreader": "*",
+        "mnb/mnb-phpexcel-core": "^1.2"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": {
+            "Mnb\\PHPExcel\\": "src/"
+        }
+    },
+    "conflict": {
+        "mnb/mnb-phpexcel": "*"
+    }
+}
