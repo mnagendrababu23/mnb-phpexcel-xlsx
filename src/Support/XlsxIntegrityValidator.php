@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Support;
 
-use ZipArchive;
+use Mnb\PHPExcel\Support\Xml\XmlReader;
+
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxIntegrityValidator
 {
@@ -397,7 +399,7 @@ final class XlsxIntegrityValidator
         $previous = libxml_use_internal_errors(true);
         libxml_clear_errors();
 
-        $reader = new \XMLReader();
+        $reader = new XmlReader();
         $opened = @$reader->XML($xml, null, LIBXML_NONET);
         if (!$opened) {
             $errors = libxml_get_errors();

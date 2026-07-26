@@ -7,7 +7,7 @@ namespace Mnb\PHPExcel\Reader;
 use Mnb\PHPExcel\Support\Coordinate;
 use Mnb\PHPExcel\Support\ErrorCode;
 use Mnb\PHPExcel\Support\MnbExcelException;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 /** @internal XLSX merged-range expansion helper. */
 final class MergedCellMap

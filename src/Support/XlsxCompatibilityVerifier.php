@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Support;
 
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
+
 use Mnb\PHPExcel\MnbExcel;
 
 final class XlsxCompatibilityVerifier
@@ -25,7 +27,7 @@ final class XlsxCompatibilityVerifier
         $cases = [];
         $warnings = [];
 
-        if (!class_exists(\ZipArchive::class)) {
+        if (!class_exists(ZipArchive::class)) {
             return [
                 'status' => 'skipped',
                 'reason' => 'ext-zip is required to generate and validate XLSX compatibility fixtures.',

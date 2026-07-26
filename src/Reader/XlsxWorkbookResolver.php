@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Mnb\PHPExcel\Reader;
 
 use Mnb\PHPExcel\Support\MnbExcelException;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxWorkbookResolver
 {

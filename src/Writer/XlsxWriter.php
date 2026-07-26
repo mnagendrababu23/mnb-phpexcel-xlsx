@@ -14,7 +14,7 @@ use Mnb\PHPExcel\Support\ErrorCode;
 use Mnb\PHPExcel\Security\FormulaGuard;
 use Mnb\PHPExcel\Support\MnbExcelException;
 use Mnb\PHPExcel\Support\XlsxIntegrityValidator;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxWriter
 {
@@ -436,18 +436,43 @@ final class XlsxWriter
                     return $index;
                 };
 
-                $rows = array_map($resolveField, array_values((array) ($definition['rows'] ?? [])));
-                $columns = array_map($resolveField, array_values((array) ($definition['columns'] ?? [])));
-                $filters = array_map($resolveField, array_values((array) ($definition['filters'] ?? [])));
+                $resolveAxis = function (array $items) use ($resolveField): array {
+                    $resolved = [];
+                    foreach (array_values($items) as $item) {
+                        $config = is_array($item) ? $item : ['field' => $item];
+                        $field = $resolveField($config['field'] ?? 1);
+                        $subtotals = array_values(array_filter(array_map('strtolower', (array) ($config['subtotals'] ?? [])), static fn (string $name): bool => in_array($name, ['sum','count','average','max','min','product','count_nums','std_dev','std_dev_p','var','var_p'], true)));
+                        $resolved[] = $config + [
+                            'field' => $field,
+                            'subtotals' => $subtotals,
+                            'sort' => in_array(strtolower((string) ($config['sort'] ?? 'manual')), ['manual','ascending','descending'], true) ? strtolower((string) ($config['sort'] ?? 'manual')) : 'manual',
+                            'show_all' => (bool) ($config['show_all'] ?? true),
+                            'repeat_labels' => (bool) ($config['repeat_labels'] ?? false),
+                            'insert_blank_row' => (bool) ($config['insert_blank_row'] ?? false),
+                            'show_items' => array_values((array) ($config['show_items'] ?? [])),
+                            'hide_items' => array_values((array) ($config['hide_items'] ?? [])),
+                        ];
+                    }
+                    return $resolved;
+                };
+                $rows = $resolveAxis((array) ($definition['rows'] ?? []));
+                $columns = $resolveAxis((array) ($definition['columns'] ?? []));
+                $filters = $resolveAxis((array) ($definition['filters'] ?? []));
                 $values = [];
                 foreach (array_values((array) ($definition['values'] ?? [])) as $value) {
                     $fieldIndex = $resolveField($value['field'] ?? 1);
                     $function = strtolower((string) ($value['function'] ?? 'sum'));
+                    $showDataAs = strtolower((string) ($value['show_data_as'] ?? 'normal'));
+                    $allowedShowDataAs = ['normal','difference','percent','percent_diff','run_total','percent_row','percent_col','percent_total','index'];
+                    if (!in_array($showDataAs, $allowedShowDataAs, true)) { $showDataAs = 'normal'; }
                     $values[] = [
                         'field' => $fieldIndex,
                         'function' => $function,
                         'name' => (string) ($value['name'] ?? ucfirst(str_replace('_', ' ', $function)) . ' of ' . $headers[$fieldIndex]),
                         'number_format' => (string) ($value['number_format'] ?? ''),
+                        'show_data_as' => $showDataAs,
+                        'base_field' => isset($value['base_field']) ? $resolveField($value['base_field']) : -1,
+                        'base_item' => (int) ($value['base_item'] ?? 1048832),
                     ];
                 }
 
@@ -493,7 +518,7 @@ final class XlsxWriter
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
             . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
-            . ' saveData="0" refreshOnLoad="' . ((bool) ($pivot['refresh_on_load'] ?? true) ? '1' : '0') . '"'
+            . ' saveData="' . ((bool) ($pivot['save_data'] ?? false) ? '1' : '0') . '" refreshOnLoad="' . ((bool) ($pivot['refresh_on_load'] ?? true) ? '1' : '0') . '"'
             . ' recordCount="' . (int) ($pivot['record_count'] ?? 0) . '" createdVersion="8" refreshedVersion="8" minRefreshableVersion="3">'
             . '<cacheSource type="worksheet"><worksheetSource ref="' . $this->esc((string) $pivot['source_range']) . '" sheet="' . $this->esc((string) $pivot['source_sheet']) . '"/></cacheSource>'
             . '<cacheFields count="' . count((array) $pivot['headers']) . '">' . $fields . '</cacheFields>'
@@ -508,60 +533,25 @@ final class XlsxWriter
         $filters = (array) ($pivot['filters_resolved'] ?? []);
         $values = (array) ($pivot['values_resolved'] ?? []);
         $fieldCount = count((array) ($pivot['headers'] ?? []));
-        $axisRows = array_fill_keys(array_map('intval', $rows), true);
-        $axisColumns = array_fill_keys(array_map('intval', $columns), true);
-        $axisFilters = array_fill_keys(array_map('intval', $filters), true);
-        $pivotFields = '';
-        for ($index = 0; $index < $fieldCount; $index++) {
-            $axis = isset($axisRows[$index]) ? ' axis="axisRow"' : (isset($axisColumns[$index]) ? ' axis="axisCol"' : (isset($axisFilters[$index]) ? ' axis="axisPage"' : ' dataField="1"'));
-            $pivotFields .= '<pivotField' . $axis . ' showAll="0"><items count="1"><item t="default"/></items></pivotField>';
+        $rowMap=[];$columnMap=[];$filterMap=[];foreach($rows as $item)$rowMap[(int)$item['field']]=$item;foreach($columns as $item)$columnMap[(int)$item['field']]=$item;foreach($filters as $item)$filterMap[(int)$item['field']]=$item;
+        $layout=(string)($pivot['layout']??'compact');$pivotFields='';
+        for($index=0;$index<$fieldCount;$index++){
+            $config=$rowMap[$index]??$columnMap[$index]??$filterMap[$index]??[];$axis=isset($rowMap[$index])?' axis="axisRow"':(isset($columnMap[$index])?' axis="axisCol"':(isset($filterMap[$index])?' axis="axisPage"':' dataField="1"'));
+            $attrs=' showAll="'.((bool)($config['show_all']??false)?'1':'0').'"';
+            if(isset($rowMap[$index])){$attrs.=' compact="'.($layout==='compact'?'1':'0').'" outline="'.($layout==='outline'?'1':'0').'"';if((bool)($config['repeat_labels']??$pivot['repeat_item_labels']??false))$attrs.=' itemPageCount="10"';if((bool)($config['insert_blank_row']??false))$attrs.=' insertBlankRow="1"';}
+            $sort=(string)($config['sort']??'manual');if($sort!=='manual')$attrs.=' sortType="'.$sort.'"';
+            $subtotalAttrs='';foreach((array)($config['subtotals']??[]) as $subtotal){$name=match($subtotal){'average'=>'avgSubtotal','max'=>'maxSubtotal','min'=>'minSubtotal','product'=>'productSubtotal','count','count_nums'=>'countSubtotal','std_dev'=>'stdDevSubtotal','std_dev_p'=>'stdDevPSubtotal','var'=>'varSubtotal','var_p'=>'varPSubtotal',default=>'sumSubtotal'};$subtotalAttrs.=' '.$name.'="1"';}
+            $pivotFields.='<pivotField'.$axis.$attrs.$subtotalAttrs.'><items count="1"><item t="default"/></items></pivotField>';
         }
-
-        $rowFields = '';
-        foreach ($rows as $field) {
-            $rowFields .= '<field x="' . (int) $field . '"/>';
-        }
-        $colFields = '';
-        foreach ($columns as $field) {
-            $colFields .= '<field x="' . (int) $field . '"/>';
-        }
-        if (count($values) > 1) {
-            $colFields .= '<field x="-2"/>';
-        }
-        $pageFields = '';
-        foreach ($filters as $field) {
-            $pageFields .= '<pageField fld="' . (int) $field . '" hier="-1"/>';
-        }
-        $dataFields = '';
-        foreach ($values as $value) {
-            $subtotal = match ((string) $value['function']) {
-                'average' => 'average', 'max' => 'max', 'min' => 'min', 'product' => 'product',
-                'count', 'count_nums' => 'count', 'std_dev' => 'stdDev', 'std_dev_p' => 'stdDevP',
-                'var' => 'var', 'var_p' => 'varP', default => 'sum',
-            };
-            $dataFields .= '<dataField name="' . $this->esc((string) $value['name']) . '" fld="' . (int) $value['field'] . '" subtotal="' . $subtotal . '"/>';
-        }
-
-        $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
-            . ' name="' . $this->esc((string) $pivot['name']) . '" cacheId="' . (int) $pivot['cacheId'] . '" dataCaption="Values"'
-            . ' updatedVersion="8" minRefreshableVersion="3" useAutoFormatting="1"'
-            . ' rowGrandTotals="' . ((bool) ($pivot['show_row_grand_totals'] ?? true) ? '1' : '0') . '"'
-            . ' colGrandTotals="' . ((bool) ($pivot['show_column_grand_totals'] ?? true) ? '1' : '0') . '">'
-            . '<location ref="' . $this->esc((string) $pivot['target_range']) . '" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/>'
-            . '<pivotFields count="' . $fieldCount . '">' . $pivotFields . '</pivotFields>';
-        if ($rows !== []) {
-            $xml .= '<rowFields count="' . count($rows) . '">' . $rowFields . '</rowFields><rowItems count="1"><i/></rowItems>';
-        }
-        if ($columns !== [] || count($values) > 1) {
-            $xml .= '<colFields count="' . (count($columns) + (count($values) > 1 ? 1 : 0)) . '">' . $colFields . '</colFields><colItems count="1"><i/></colItems>';
-        }
-        if ($filters !== []) {
-            $xml .= '<pageFields count="' . count($filters) . '">' . $pageFields . '</pageFields>';
-        }
-        $xml .= '<dataFields count="' . count($values) . '">' . $dataFields . '</dataFields>'
-            . '<pivotTableStyleInfo name="' . $this->esc((string) ($pivot['style'] ?? 'PivotStyleMedium9')) . '" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="0"/>'
-            . '</pivotTableDefinition>';
+        $rowFields='';foreach($rows as $item)$rowFields.='<field x="'.(int)$item['field'].'"/>';
+        $colFields='';foreach($columns as $item)$colFields.='<field x="'.(int)$item['field'].'"/>';if(count($values)>1)$colFields.='<field x="-2"/>';
+        $pageFields='';foreach($filters as $item)$pageFields.='<pageField fld="'.(int)$item['field'].'" hier="-1"'.(isset($item['selected_item'])?' item="'.(int)$item['selected_item'].'"':'').'/>';
+        $dataFields='';foreach($values as $value){$subtotal=match((string)$value['function']){'average'=>'average','max'=>'max','min'=>'min','product'=>'product','count','count_nums'=>'count','std_dev'=>'stdDev','std_dev_p'=>'stdDevP','var'=>'var','var_p'=>'varP',default=>'sum'};$show=match((string)($value['show_data_as']??'normal')){'difference'=>'difference','percent'=>'percent','percent_diff'=>'percentDiff','run_total'=>'runTotal','percent_row'=>'percentOfRow','percent_col'=>'percentOfCol','percent_total'=>'percentOfTotal','index'=>'index',default=>'normal'};$dataFields.='<dataField name="'.$this->esc((string)$value['name']).'" fld="'.(int)$value['field'].'" subtotal="'.$subtotal.'"'.($show!=='normal'?' showDataAs="'.$show.'" baseField="'.(int)($value['base_field']??-1).'" baseItem="'.(int)($value['base_item']??1048832).'"':'').'/>';}
+        $xml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'.'<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="'.$this->esc((string)$pivot['name']).'" cacheId="'.(int)$pivot['cacheId'].'" dataCaption="'.$this->esc((string)($pivot['data_caption']??'Values')).'" rowHeaderCaption="'.$this->esc((string)($pivot['row_header_caption']??'Row Labels')).'" colHeaderCaption="'.$this->esc((string)($pivot['column_header_caption']??'Column Labels')).'" grandTotalCaption="'.$this->esc((string)($pivot['grand_total_caption']??'Grand Total')).'" updatedVersion="8" minRefreshableVersion="3" useAutoFormatting="1" preserveFormatting="'.((bool)($pivot['preserve_formatting']??true)?'1':'0').'" showDrill="'.((bool)($pivot['show_drill']??true)?'1':'0').'" enableWizard="'.((bool)($pivot['show_field_list']??true)?'1':'0').'" showEmptyRow="'.((bool)($pivot['show_empty_rows']??false)?'1':'0').'" showEmptyCol="'.((bool)($pivot['show_empty_columns']??false)?'1':'0').'" rowGrandTotals="'.((bool)($pivot['show_row_grand_totals']??true)?'1':'0').'" colGrandTotals="'.((bool)($pivot['show_column_grand_totals']??true)?'1':'0').'">'.'<location ref="'.$this->esc((string)$pivot['target_range']).'" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/>'.'<pivotFields count="'.$fieldCount.'">'.$pivotFields.'</pivotFields>';
+        if($rows!==[])$xml.='<rowFields count="'.count($rows).'">'.$rowFields.'</rowFields><rowItems count="1"><i/></rowItems>';
+        if($columns!==[]||count($values)>1)$xml.='<colFields count="'.(count($columns)+(count($values)>1?1:0)).'">'.$colFields.'</colFields><colItems count="1"><i/></colItems>';
+        if($filters!==[])$xml.='<pageFields count="'.count($filters).'">'.$pageFields.'</pageFields>';
+        $xml.='<dataFields count="'.count($values).'">'.$dataFields.'</dataFields>'.'<pivotTableStyleInfo name="'.$this->esc((string)($pivot['style']??'PivotStyleMedium9')).'" showRowHeaders="'.((bool)($pivot['show_row_headers']??true)?'1':'0').'" showColHeaders="'.((bool)($pivot['show_column_headers']??true)?'1':'0').'" showRowStripes="'.((bool)($pivot['show_row_stripes']??false)?'1':'0').'" showColStripes="'.((bool)($pivot['show_column_stripes']??false)?'1':'0').'" showLastColumn="'.((bool)($pivot['show_last_column']??false)?'1':'0').'"/>'.'</pivotTableDefinition>';
         return $xml;
     }
 

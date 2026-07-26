@@ -6,7 +6,7 @@ namespace Mnb\PHPExcel\Reader;
 
 use Mnb\PHPExcel\Core\RichText;
 use Mnb\PHPExcel\Support\MnbExcelException;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxMetadataExtractor
 {

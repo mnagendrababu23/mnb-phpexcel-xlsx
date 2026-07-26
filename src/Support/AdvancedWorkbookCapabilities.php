@@ -20,8 +20,8 @@ final class AdvancedWorkbookCapabilities
                 ],
                 'many_spreadsheet_formats' => [
                     'status' => 'supported_modularly',
-                    'current' => ['native XLSX', 'CSV/TSV', 'JSON/NDJSON', 'XML', 'native ODS reading', 'legacy XLS reading through the dedicated XLS module'],
-                    'limits' => ['legacy XLS writing and ODS writing are not part of the current package family'],
+                    'current' => ['native XLSX', 'CSV/TSV', 'JSON/NDJSON', 'XML', 'native ODS reading', 'legacy XLS reading and writing through the dedicated XLS module'],
+                    'limits' => ['ODS writing is not part of the current package family'],
                 ],
                 'advanced_style_manipulation' => [
                     'status' => 'supported',
@@ -30,8 +30,8 @@ final class AdvancedWorkbookCapabilities
                 ],
                 'formula_calculation_engine' => [
                     'status' => 'supported',
-                    'current' => ['formula expression reads', 'cached-result reads', 'formula writing', 'recalculate-on-open flags', 'built-in common-formula evaluator', 'automatic PhpSpreadsheet compatibility fallback in full installs'],
-                    'limits' => ['rare or vendor-specific functions may use the compatibility fallback'],
+                    'current' => ['formula expression reads', 'cached-result reads', 'formula writing', 'recalculate-on-open flags', 'expanded built-in formula evaluator', 'custom function registry', 'automatic PhpSpreadsheet compatibility fallback in XLS/full installs'],
+                    'limits' => ['vendor-specific functions use a registered custom function or the compatibility engine'],
                 ],
                 'charts' => [
                     'status' => 'supported',
@@ -40,8 +40,8 @@ final class AdvancedWorkbookCapabilities
                 ],
                 'pivot_tables' => [
                     'status' => 'supported',
-                    'current' => ['from-scratch pivot generation', 'row/column/filter/value fields', 'aggregation functions', 'styles', 'pivot table preservation', 'source rebinding', 'refresh-on-open'],
-                    'limits' => ['OLAP/data-model pivots and slicer authoring remain template-preservation workflows'],
+                    'current' => ['from-scratch pivot generation', 'row/column/filter/value fields', 'aggregation functions', 'layouts', 'subtotals', 'sorting', 'show-values-as modes', 'styles', 'pivot table preservation', 'source rebinding', 'refresh-on-open'],
+                    'limits' => ['OLAP/data-model pivots and slicers are preserved through trusted templates'],
                 ],
                 'complex_workbook_preservation' => [
                     'status' => 'supported_for_trusted_templates',

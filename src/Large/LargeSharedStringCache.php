@@ -10,7 +10,7 @@ use Mnb\PHPExcel\Support\ErrorCode;
 use Mnb\PHPExcel\Support\MnbExcelException;
 use PDO;
 use Throwable;
-use XMLReader;
+use Mnb\PHPExcel\Support\Xml\XmlReader;
 
 /**
  * Shared strings cache for streaming XLSX import.
@@ -151,7 +151,7 @@ final class LargeSharedStringCache implements SharedStringProviderInterface
 
     private static function extractEntryToTempFile(string $realPath, string $entry, string $tempDir): ?string
     {
-        $zip = new \ZipArchive();
+        $zip = new ZipArchive();
         $openResult = $zip->open($realPath);
         if ($openResult !== true) {
             throw MnbExcelException::withCode(

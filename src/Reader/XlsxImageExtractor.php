@@ -6,7 +6,7 @@ namespace Mnb\PHPExcel\Reader;
 
 use Mnb\PHPExcel\Support\Coordinate;
 use Mnb\PHPExcel\Support\MnbExcelException;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxImageExtractor
 {

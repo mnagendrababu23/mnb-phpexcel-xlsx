@@ -16,8 +16,8 @@ use Mnb\PHPExcel\Reader\SharedStrings\InMemorySharedStringProvider;
 use Mnb\PHPExcel\Reader\SharedStrings\SharedStringProviderInterface;
 use Mnb\PHPExcel\Reader\State\FormulaResult;
 use Mnb\PHPExcel\Support\XlsxIntegrityValidator;
-use XMLReader;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Xml\XmlReader;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxReader implements IterableReaderInterface
 {

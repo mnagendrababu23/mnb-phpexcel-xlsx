@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Mnb\PHPExcel\Reader;
 
 use Mnb\PHPExcel\Support\MnbExcelException;
-use XMLReader;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Xml\XmlReader;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxInspector
 {

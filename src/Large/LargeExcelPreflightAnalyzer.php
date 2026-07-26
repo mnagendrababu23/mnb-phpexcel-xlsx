@@ -7,8 +7,8 @@ namespace Mnb\PHPExcel\Large;
 use Mnb\PHPExcel\Reader\XlsxWorkbookResolver;
 use Mnb\PHPExcel\Support\ErrorCode;
 use Mnb\PHPExcel\Support\MnbExcelException;
-use XMLReader;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Xml\XmlReader;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 /**
  * Safely inspects XLSX size/shape without loading worksheet rows into PHP arrays.

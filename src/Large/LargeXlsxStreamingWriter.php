@@ -17,7 +17,7 @@ use Mnb\PHPExcel\Support\MnbExcelException;
 use Mnb\PHPExcel\Support\ValueSanitizer;
 use Mnb\PHPExcel\Support\XlsxIntegrityValidator;
 use Throwable;
-use ZipArchive;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 /**
  * Low-memory XLSX/CSV-ZIP writer for very large tabular exports.
