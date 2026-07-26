@@ -6,7 +6,7 @@ namespace Mnb\PHPExcel\Reader;
 
 use DateTimeImmutable;
 use Mnb\PHPExcel\Core\RichText;
-use Mnb\PHPExcel\Reader\Formula\PhpSpreadsheetFormulaEvaluator;
+use Mnb\PHPExcel\Reader\Formula\FormulaEvaluatorFactory;
 use Mnb\PHPExcel\Reader\State\CellSnapshot;
 use Mnb\PHPExcel\Support\Coordinate;
 use Mnb\PHPExcel\Support\ErrorCode;
@@ -281,7 +281,7 @@ final class XlsxReader implements IterableReaderInterface
             $images = array_values(array_filter((array) ($metadata['images'] ?? []), static fn (array $item): bool => strtoupper((string) ($item['cell'] ?? '')) === $cell));
             $calculated = null;
             if ((bool) ($options['calculate'] ?? false)) {
-                $calculated = (new PhpSpreadsheetFormulaEvaluator())->calculateCell($realPath, $sheet, $cell);
+                $calculated = FormulaEvaluatorFactory::create((bool) ($options['prefer_native_formula_engine'] ?? false))->calculateCell($realPath, $sheet, $cell);
             }
             return new CellSnapshot(
                 $cell,
@@ -377,13 +377,13 @@ final class XlsxReader implements IterableReaderInterface
 
     public function calculateCell(string $path, string $cell, int|string $sheet = 1): mixed
     {
-        return (new PhpSpreadsheetFormulaEvaluator())->calculateCell($path, $sheet, $cell);
+        return FormulaEvaluatorFactory::create()->calculateCell($path, $sheet, $cell);
     }
 
     /** @return array<string,mixed> */
     public function calculateRange(string $path, string $range, int|string $sheet = 1): array
     {
-        return (new PhpSpreadsheetFormulaEvaluator())->calculateRange($path, $sheet, $range);
+        return FormulaEvaluatorFactory::create()->calculateRange($path, $sheet, $range);
     }
 
     private function readSharedStrings(string $realPath, array $options = []): SharedStringProviderInterface

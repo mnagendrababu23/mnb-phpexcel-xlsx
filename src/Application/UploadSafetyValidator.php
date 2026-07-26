@@ -16,7 +16,7 @@ final class UploadSafetyValidator
         $reportedSize = is_array($file) && isset($file['size']) ? max(0, (int) $file['size']) : null;
         $actualSize = is_file($path) ? max(0, (int) filesize($path)) : 0;
         $size = $actualSize > 0 ? $actualSize : ($reportedSize ?? 0);
-        $allowed = array_values(array_unique(array_map('strtolower', (array) ($options['allowed_extensions'] ?? ['xlsx', 'csv', 'json', 'xml']))));
+        $allowed = array_values(array_unique(array_map('strtolower', (array) ($options['allowed_extensions'] ?? ['xlsx', 'xls', 'ods', 'csv', 'tsv', 'json', 'xml']))));
         $maxBytes = max(0, (int) (($options['max_size_mb'] ?? 100) * 1024 * 1024));
         $extension = strtolower(pathinfo($name !== '' ? $name : $path, PATHINFO_EXTENSION));
         $errors = [];
@@ -114,7 +114,9 @@ final class UploadSafetyValidator
                 'application/x-zip-compressed',
                 'application/octet-stream',
             ],
-            'csv' => ['text/csv', 'text/plain', 'application/csv', 'application/vnd.ms-excel', 'application/octet-stream'],
+            'csv', 'tsv' => ['text/csv', 'text/tab-separated-values', 'text/plain', 'application/csv', 'application/vnd.ms-excel', 'application/octet-stream'],
+            'xls' => ['application/vnd.ms-excel', 'application/x-ole-storage', 'application/octet-stream'],
+            'ods' => ['application/vnd.oasis.opendocument.spreadsheet', 'application/zip', 'application/octet-stream'],
             'json' => ['application/json', 'text/json', 'text/plain', 'application/octet-stream'],
             'xml' => ['application/xml', 'text/xml', 'text/plain', 'application/octet-stream'],
             default => [],

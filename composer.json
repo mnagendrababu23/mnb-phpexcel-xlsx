@@ -1,18 +1,18 @@
 {
     "name": "mnb/mnb-phpexcel-xlsx",
-    "description": "Native XLSX reader/writer and low-memory streaming XLSX module for MNB PHPExcel.",
+    "description": "Native XLSX reader/writer, formula engine, pivot generation, and low-memory streaming module for MNB PHPExcel.",
     "type": "library",
     "license": "MIT",
     "require": {
         "php": ">=8.1",
         "ext-zip": "*",
         "ext-xmlreader": "*",
-        "mnb/mnb-phpexcel-core": "^1.3"
+        "mnb/mnb-phpexcel-core": "^1.5"
     },
     "minimum-stability": "stable",
     "prefer-stable": true,
     "suggest": {
-        "phpoffice/phpspreadsheet": "Enables true formula recalculation through the optional formula evaluator."
+        "phpoffice/phpspreadsheet": "Adds compatibility for formulas outside the built-in native formula engine."
     },
     "autoload": {
         "psr-4": {

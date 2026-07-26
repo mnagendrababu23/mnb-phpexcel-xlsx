@@ -56,7 +56,11 @@ final class XlsxWriter
         $this->buildStyleRegistry($workbook);
         $imagePlan = $this->buildImagePlan($workbook);
         $chartPlan = $this->buildChartPlan($workbook);
+        $pivotPlan = $this->buildPivotPlan($workbook);
         $preservedPackage = $this->loadPreservedPackage($workbook, $imagePlan, $chartPlan);
+        if ($pivotPlan !== [] && is_array($preservedPackage) && (string) ($preservedPackage['workbook_pivot_caches'] ?? '') !== '') {
+            throw new MnbExcelException('Generated pivot tables cannot be combined with preserved template pivots in the same write.');
+        }
 
         $zip = new ZipArchive();
         $openResult = $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
@@ -75,22 +79,23 @@ final class XlsxWriter
         };
 
         try {
-            $addXml('[Content_Types].xml', $this->contentTypes($workbook, $imagePlan, $chartPlan, $preservedPackage));
+            $addXml('[Content_Types].xml', $this->contentTypes($workbook, $imagePlan, $chartPlan, $pivotPlan, $preservedPackage));
             $addXml('_rels/.rels', $this->rootRels());
             $addXml('docProps/core.xml', $this->coreProps($workbook->metadata));
             $addXml('docProps/app.xml', $this->appProps($workbook->metadata));
-            $addXml('xl/workbook.xml', $this->workbookXml($workbook, $preservedPackage));
-            $addXml('xl/_rels/workbook.xml.rels', $this->workbookRels(count($workbook->sheets), $preservedPackage));
+            $addXml('xl/workbook.xml', $this->workbookXml($workbook, $pivotPlan, $preservedPackage));
+            $addXml('xl/_rels/workbook.xml.rels', $this->workbookRels(count($workbook->sheets), $pivotPlan, $preservedPackage));
             $addXml('xl/styles.xml', $this->stylesXml());
 
             foreach ($workbook->sheets as $index => $sheet) {
                 $sheetNumber = $index + 1;
                 $sheetImages = $imagePlan[$sheetNumber] ?? [];
                 $sheetCharts = $chartPlan[$sheetNumber] ?? [];
+                $sheetPivots = $pivotPlan[$sheetNumber] ?? [];
                 $hasDrawing = $sheetImages !== [] || $sheetCharts !== [];
                 $hasHyperlinks = $sheet->hyperlinks !== [];
                 $hasComments = $sheet->comments !== [];
-                $hasGeneratedSheetRels = $hasDrawing || $hasHyperlinks || $hasComments;
+                $hasGeneratedSheetRels = $hasDrawing || $hasHyperlinks || $hasComments || $sheetPivots !== [];
                 $preservedSheet = is_array($preservedPackage) ? ($preservedPackage['sheets'][$sheetNumber] ?? null) : null;
                 if ($hasGeneratedSheetRels && is_array($preservedSheet) && (bool) ($preservedSheet['requires_relationships'] ?? false)) {
                     throw new MnbExcelException(
@@ -98,10 +103,10 @@ final class XlsxWriter
                         . 'Keep those objects in the template, generate them on another sheet, or disable package preservation for this workbook.'
                     );
                 }
-                $addXml('xl/worksheets/sheet' . $sheetNumber . '.xml', $this->worksheetXml($sheet, $hasDrawing, is_array($preservedSheet) ? $preservedSheet : null));
+                $addXml('xl/worksheets/sheet' . $sheetNumber . '.xml', $this->worksheetXml($sheet, $hasDrawing, $sheetPivots, is_array($preservedSheet) ? $preservedSheet : null));
 
                 if ($hasGeneratedSheetRels) {
-                    $addXml('xl/worksheets/_rels/sheet' . $sheetNumber . '.xml.rels', $this->sheetRelationships($sheetNumber, $sheet, $hasDrawing));
+                    $addXml('xl/worksheets/_rels/sheet' . $sheetNumber . '.xml.rels', $this->sheetRelationships($sheetNumber, $sheet, $hasDrawing, $sheetPivots));
                 } elseif (is_array($preservedSheet) && ($preservedSheet['rels_xml'] ?? '') !== '') {
                     $entry = 'xl/worksheets/_rels/sheet' . $sheetNumber . '.xml.rels';
                     $addXml($entry, (string) $preservedSheet['rels_xml']);
@@ -125,6 +130,13 @@ final class XlsxWriter
                 if ($hasComments) {
                     $addXml('xl/comments' . $sheetNumber . '.xml', $this->commentsXml($sheet));
                     $addXml('xl/drawings/vmlDrawing' . $sheetNumber . '.vml', $this->commentsVmlDrawingXml($sheet));
+                }
+
+                foreach ($sheetPivots as $pivot) {
+                    $number = (int) $pivot['pivotNumber'];
+                    $addXml('xl/pivotTables/pivotTable' . $number . '.xml', $this->pivotTableXml($pivot));
+                    $addXml('xl/pivotTables/_rels/pivotTable' . $number . '.xml.rels', $this->pivotTableRelationships($number));
+                    $addXml('xl/pivotCache/pivotCacheDefinition' . $number . '.xml', $this->pivotCacheDefinitionXml($pivot));
                 }
             }
 
@@ -375,6 +387,192 @@ final class XlsxWriter
         return $plan;
     }
 
+    /** @return array<int,list<array<string,mixed>>> */
+    private function buildPivotPlan(WorkbookData $workbook): array
+    {
+        $plan = [];
+        $sheetByName = [];
+        foreach ($workbook->sheets as $index => $sheet) {
+            $sheetByName[$sheet->name] = ['index' => $index + 1, 'sheet' => $sheet];
+        }
+
+        $pivotNumber = 1;
+        $names = [];
+        foreach ($workbook->sheets as $targetIndex => $targetSheet) {
+            foreach ($targetSheet->pivotTables as $definition) {
+                $sourceName = (string) ($definition['source_sheet'] ?? '');
+                if (!isset($sheetByName[$sourceName])) {
+                    throw new MnbExcelException('Pivot source worksheet not found: ' . $sourceName);
+                }
+                /** @var WorksheetData $sourceSheet */
+                $sourceSheet = $sheetByName[$sourceName]['sheet'];
+                [$startRef, $endRef] = $this->normalizeRange((string) ($definition['source_range'] ?? 'A1:A1'));
+                [$startColumn, $startRow] = Coordinate::splitCellRef($startRef);
+                [$endColumn, $endRow] = Coordinate::splitCellRef($endRef);
+                $firstColumn = min($startColumn, $endColumn);
+                $lastColumn = max($startColumn, $endColumn);
+                $headerRow = min($startRow, $endRow);
+                $headers = [];
+                for ($column = $firstColumn; $column <= $lastColumn; $column++) {
+                    $value = $sourceSheet->rows[$headerRow - 1][$column - 1] ?? null;
+                    $name = trim((string) ($value instanceof CellValue ? $value->displayValue() : $value));
+                    $headers[] = $name !== '' ? $name : 'Field' . ($column - $firstColumn + 1);
+                }
+
+                $resolveField = function (mixed $field) use ($headers, $firstColumn): int {
+                    if (is_int($field) || ctype_digit((string) $field)) {
+                        $index = (int) $field - 1;
+                    } elseif (preg_match('/^[A-Za-z]{1,3}$/', trim((string) $field)) === 1) {
+                        $index = Coordinate::columnNameToIndex((string) $field) - $firstColumn;
+                    } else {
+                        $index = array_search(strtolower(trim((string) $field)), array_map('strtolower', $headers), true);
+                        if ($index === false) {
+                            throw new MnbExcelException('Pivot field not found: ' . (string) $field);
+                        }
+                    }
+                    if ($index < 0 || $index >= count($headers)) {
+                        throw new MnbExcelException('Pivot field is outside the source range: ' . (string) $field);
+                    }
+                    return $index;
+                };
+
+                $rows = array_map($resolveField, array_values((array) ($definition['rows'] ?? [])));
+                $columns = array_map($resolveField, array_values((array) ($definition['columns'] ?? [])));
+                $filters = array_map($resolveField, array_values((array) ($definition['filters'] ?? [])));
+                $values = [];
+                foreach (array_values((array) ($definition['values'] ?? [])) as $value) {
+                    $fieldIndex = $resolveField($value['field'] ?? 1);
+                    $function = strtolower((string) ($value['function'] ?? 'sum'));
+                    $values[] = [
+                        'field' => $fieldIndex,
+                        'function' => $function,
+                        'name' => (string) ($value['name'] ?? ucfirst(str_replace('_', ' ', $function)) . ' of ' . $headers[$fieldIndex]),
+                        'number_format' => (string) ($value['number_format'] ?? ''),
+                    ];
+                }
+
+                $targetCell = strtoupper((string) ($definition['target_cell'] ?? 'A1'));
+                [$targetColumn, $targetRow] = Coordinate::splitCellRef($targetCell);
+                $endTarget = Coordinate::columnIndexToName($targetColumn + max(3, (int) ($definition['width'] ?? 8)) - 1)
+                    . ($targetRow + max(5, (int) ($definition['height'] ?? 20)) - 1);
+                $name = (string) ($definition['name'] ?? ('PivotTable' . $pivotNumber));
+                $baseName = $name;
+                $suffix = 2;
+                while (isset($names[strtolower($name)])) {
+                    $name = $baseName . '_' . $suffix++;
+                }
+                $names[strtolower($name)] = true;
+
+                $plan[$targetIndex + 1][] = $definition + [
+                    'pivotNumber' => $pivotNumber,
+                    'cacheId' => $pivotNumber,
+                    'name' => $name,
+                    'source_sheet' => $sourceName,
+                    'source_range' => $startRef . ':' . $endRef,
+                    'target_range' => $targetCell . ':' . $endTarget,
+                    'headers' => $headers,
+                    'rows_resolved' => $rows,
+                    'columns_resolved' => $columns,
+                    'filters_resolved' => $filters,
+                    'values_resolved' => $values,
+                    'record_count' => max(0, max($startRow, $endRow) - $headerRow),
+                ];
+                $pivotNumber++;
+            }
+        }
+        return $plan;
+    }
+
+    /** @param array<string,mixed> $pivot */
+    private function pivotCacheDefinitionXml(array $pivot): string
+    {
+        $fields = '';
+        foreach ((array) $pivot['headers'] as $header) {
+            $fields .= '<cacheField name="' . $this->esc((string) $header) . '" numFmtId="0"><sharedItems/></cacheField>';
+        }
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+            . ' saveData="0" refreshOnLoad="' . ((bool) ($pivot['refresh_on_load'] ?? true) ? '1' : '0') . '"'
+            . ' recordCount="' . (int) ($pivot['record_count'] ?? 0) . '" createdVersion="8" refreshedVersion="8" minRefreshableVersion="3">'
+            . '<cacheSource type="worksheet"><worksheetSource ref="' . $this->esc((string) $pivot['source_range']) . '" sheet="' . $this->esc((string) $pivot['source_sheet']) . '"/></cacheSource>'
+            . '<cacheFields count="' . count((array) $pivot['headers']) . '">' . $fields . '</cacheFields>'
+            . '</pivotCacheDefinition>';
+    }
+
+    /** @param array<string,mixed> $pivot */
+    private function pivotTableXml(array $pivot): string
+    {
+        $rows = (array) ($pivot['rows_resolved'] ?? []);
+        $columns = (array) ($pivot['columns_resolved'] ?? []);
+        $filters = (array) ($pivot['filters_resolved'] ?? []);
+        $values = (array) ($pivot['values_resolved'] ?? []);
+        $fieldCount = count((array) ($pivot['headers'] ?? []));
+        $axisRows = array_fill_keys(array_map('intval', $rows), true);
+        $axisColumns = array_fill_keys(array_map('intval', $columns), true);
+        $axisFilters = array_fill_keys(array_map('intval', $filters), true);
+        $pivotFields = '';
+        for ($index = 0; $index < $fieldCount; $index++) {
+            $axis = isset($axisRows[$index]) ? ' axis="axisRow"' : (isset($axisColumns[$index]) ? ' axis="axisCol"' : (isset($axisFilters[$index]) ? ' axis="axisPage"' : ' dataField="1"'));
+            $pivotFields .= '<pivotField' . $axis . ' showAll="0"><items count="1"><item t="default"/></items></pivotField>';
+        }
+
+        $rowFields = '';
+        foreach ($rows as $field) {
+            $rowFields .= '<field x="' . (int) $field . '"/>';
+        }
+        $colFields = '';
+        foreach ($columns as $field) {
+            $colFields .= '<field x="' . (int) $field . '"/>';
+        }
+        if (count($values) > 1) {
+            $colFields .= '<field x="-2"/>';
+        }
+        $pageFields = '';
+        foreach ($filters as $field) {
+            $pageFields .= '<pageField fld="' . (int) $field . '" hier="-1"/>';
+        }
+        $dataFields = '';
+        foreach ($values as $value) {
+            $subtotal = match ((string) $value['function']) {
+                'average' => 'average', 'max' => 'max', 'min' => 'min', 'product' => 'product',
+                'count', 'count_nums' => 'count', 'std_dev' => 'stdDev', 'std_dev_p' => 'stdDevP',
+                'var' => 'var', 'var_p' => 'varP', default => 'sum',
+            };
+            $dataFields .= '<dataField name="' . $this->esc((string) $value['name']) . '" fld="' . (int) $value['field'] . '" subtotal="' . $subtotal . '"/>';
+        }
+
+        $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            . ' name="' . $this->esc((string) $pivot['name']) . '" cacheId="' . (int) $pivot['cacheId'] . '" dataCaption="Values"'
+            . ' updatedVersion="8" minRefreshableVersion="3" useAutoFormatting="1"'
+            . ' rowGrandTotals="' . ((bool) ($pivot['show_row_grand_totals'] ?? true) ? '1' : '0') . '"'
+            . ' colGrandTotals="' . ((bool) ($pivot['show_column_grand_totals'] ?? true) ? '1' : '0') . '">'
+            . '<location ref="' . $this->esc((string) $pivot['target_range']) . '" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/>'
+            . '<pivotFields count="' . $fieldCount . '">' . $pivotFields . '</pivotFields>';
+        if ($rows !== []) {
+            $xml .= '<rowFields count="' . count($rows) . '">' . $rowFields . '</rowFields><rowItems count="1"><i/></rowItems>';
+        }
+        if ($columns !== [] || count($values) > 1) {
+            $xml .= '<colFields count="' . (count($columns) + (count($values) > 1 ? 1 : 0)) . '">' . $colFields . '</colFields><colItems count="1"><i/></colItems>';
+        }
+        if ($filters !== []) {
+            $xml .= '<pageFields count="' . count($filters) . '">' . $pageFields . '</pageFields>';
+        }
+        $xml .= '<dataFields count="' . count($values) . '">' . $dataFields . '</dataFields>'
+            . '<pivotTableStyleInfo name="' . $this->esc((string) ($pivot['style'] ?? 'PivotStyleMedium9')) . '" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="0"/>'
+            . '</pivotTableDefinition>';
+        return $xml;
+    }
+
+    private function pivotTableRelationships(int $number): string
+    {
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition' . $number . '.xml"/>'
+            . '</Relationships>';
+    }
+
     /** @param array<string,mixed> $style */
     private function differentialStyleIdFor(array $style): int
     {
@@ -391,8 +589,8 @@ final class XlsxWriter
         return $this->differentialStyleIds[$key];
     }
 
-    /** @param array<int, list<array{extension:string}>> $imagePlan @param array<int,list<array<string,mixed>>> $chartPlan @param array<string,mixed>|null $preservedPackage */
-    private function contentTypes(WorkbookData $workbook, array $imagePlan, array $chartPlan, ?array $preservedPackage = null): string
+    /** @param array<int, list<array{extension:string}>> $imagePlan @param array<int,list<array<string,mixed>>> $chartPlan @param array<int,list<array<string,mixed>>> $pivotPlan @param array<string,mixed>|null $preservedPackage */
+    private function contentTypes(WorkbookData $workbook, array $imagePlan, array $chartPlan, array $pivotPlan, ?array $preservedPackage = null): string
     {
         $sheetCount = count($workbook->sheets);
 
@@ -439,6 +637,11 @@ final class XlsxWriter
             }
             foreach ($chartPlan[$i] ?? [] as $chart) {
                 $overrides['/xl/charts/' . $chart['partName']] = 'application/vnd.openxmlformats-officedocument.drawingml.chart+xml';
+            }
+            foreach ($pivotPlan[$i] ?? [] as $pivot) {
+                $number = (int) $pivot['pivotNumber'];
+                $overrides['/xl/pivotTables/pivotTable' . $number . '.xml'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml';
+                $overrides['/xl/pivotCache/pivotCacheDefinition' . $number . '.xml'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml';
             }
             if (($workbook->sheets[$i - 1]->comments ?? []) !== []) {
                 $overrides['/xl/comments' . $i . '.xml'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml';
@@ -820,8 +1023,8 @@ final class XlsxWriter
             . '</Relationships>';
     }
 
-    /** @param array<string,mixed>|null $preservedPackage */
-    private function workbookRels(int $sheetCount, ?array $preservedPackage = null): string
+    /** @param array<int,list<array<string,mixed>>> $pivotPlan @param array<string,mixed>|null $preservedPackage */
+    private function workbookRels(int $sheetCount, array $pivotPlan, ?array $preservedPackage = null): string
     {
         $rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
@@ -831,6 +1034,12 @@ final class XlsxWriter
         }
 
         $rels .= '<Relationship Id="rId' . ($sheetCount + 1) . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
+        foreach ($pivotPlan as $pivots) {
+            foreach ($pivots as $pivot) {
+                $number = (int) $pivot['pivotNumber'];
+                $rels .= '<Relationship Id="rIdPivotCache' . $number . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition' . $number . '.xml"/>';
+            }
+        }
         foreach ((array) ($preservedPackage['workbook_relationships'] ?? []) as $relationship) {
             if (!is_array($relationship)) {
                 continue;
@@ -840,8 +1049,8 @@ final class XlsxWriter
         return $rels . '</Relationships>';
     }
 
-    /** @param array<string,mixed>|null $preservedPackage */
-    private function workbookXml(WorkbookData $workbook, ?array $preservedPackage = null): string
+    /** @param array<int,list<array<string,mixed>>> $pivotPlan @param array<string,mixed>|null $preservedPackage */
+    private function workbookXml(WorkbookData $workbook, array $pivotPlan, ?array $preservedPackage = null): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
@@ -852,6 +1061,18 @@ final class XlsxWriter
             $xml .= '<sheet name="' . $this->esc($sheet->name) . '" sheetId="' . $id . '" r:id="rId' . $id . '"/>';
         }
         $xml .= '</sheets>';
+        $generatedPivotCaches = '';
+        $pivotCount = 0;
+        foreach ($pivotPlan as $pivots) {
+            foreach ($pivots as $pivot) {
+                $number = (int) $pivot['pivotNumber'];
+                $generatedPivotCaches .= '<pivotCache cacheId="' . $number . '" r:id="rIdPivotCache' . $number . '"/>';
+                $pivotCount++;
+            }
+        }
+        if ($pivotCount > 0) {
+            $xml .= '<pivotCaches count="' . $pivotCount . '">' . $generatedPivotCaches . '</pivotCaches>';
+        }
         $pivotCaches = (string) ($preservedPackage['workbook_pivot_caches'] ?? '');
         if ($pivotCaches !== '') {
             $xml .= $pivotCaches;
@@ -859,13 +1080,14 @@ final class XlsxWriter
         return $xml . '<calcPr calcId="191029" fullCalcOnLoad="1" forceFullCalc="1"/></workbook>';
     }
 
-    /** @param array<string,mixed>|null $preservedSheet */
-    private function worksheetXml(WorksheetData $sheet, bool $hasImages = false, ?array $preservedSheet = null): string
+    /** @param list<array<string,mixed>> $pivotTables @param array<string,mixed>|null $preservedSheet */
+    private function worksheetXml(WorksheetData $sheet, bool $hasImages = false, ?array $pivotTables = [], ?array $preservedSheet = null): string
     {
+        $pivotTables ??= [];
         $rowCount = count($sheet->rows);
         $columnCount = $this->maxColumnCount($sheet->rows);
         $lastCell = $columnCount > 0 && $rowCount > 0 ? Coordinate::columnIndexToName($columnCount) . $rowCount : 'A1';
-        $needsRelationships = $hasImages || $sheet->hyperlinks !== [] || $sheet->comments !== [] || (is_array($preservedSheet) && (bool) ($preservedSheet['requires_relationships'] ?? false));
+        $needsRelationships = $hasImages || $sheet->hyperlinks !== [] || $sheet->comments !== [] || $pivotTables !== [] || (is_array($preservedSheet) && (bool) ($preservedSheet['requires_relationships'] ?? false));
         $xmlnsR = $needsRelationships ? ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' : '';
 
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -956,6 +1178,14 @@ final class XlsxWriter
             foreach ((array) ($preservedSheet['elements'] ?? []) as $element) {
                 $xml .= (string) $element;
             }
+        }
+
+        if ($pivotTables !== []) {
+            $xml .= '<pivotTableParts count="' . count($pivotTables) . '">';
+            foreach (array_values($pivotTables) as $index => $_pivot) {
+                $xml .= '<pivotTablePart r:id="' . $this->pivotRelationshipId($hasImages, count($sheet->hyperlinks), $sheet->comments !== [], $index) . '"/>';
+            }
+            $xml .= '</pivotTableParts>';
         }
 
         if ($hasImages) {
@@ -1414,6 +1644,16 @@ final class XlsxWriter
         return $xml . '</dataValidations>';
     }
 
+    /** @return array{string,string} */
+    private function normalizeRange(string $range): array
+    {
+        $range = strtoupper(str_replace('$', '', trim($range)));
+        if (preg_match('/^([A-Z]{1,3}[1-9][0-9]*)(?::([A-Z]{1,3}[1-9][0-9]*))?$/', $range, $match) !== 1) {
+            throw new MnbExcelException('Invalid cell range: ' . $range);
+        }
+        return [$match[1], $match[2] ?? $match[1]];
+    }
+
     private function cellInRange(string $cellRef, string $range): bool
     {
         [$cellColumn, $cellRow] = Coordinate::splitCellRef($cellRef);
@@ -1427,7 +1667,8 @@ final class XlsxWriter
             && $cellRow <= max($startRow, $endRow);
     }
 
-    private function sheetRelationships(int $sheetNumber, WorksheetData $sheet, bool $hasImages): string
+    /** @param list<array<string,mixed>> $pivotTables */
+    private function sheetRelationships(int $sheetNumber, WorksheetData $sheet, bool $hasImages, array $pivotTables = []): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
@@ -1447,6 +1688,11 @@ final class XlsxWriter
             $xml .= '<Relationship Id="' . $vmlRid . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawing' . $sheetNumber . '.vml"/>';
         }
 
+        foreach (array_values($pivotTables) as $index => $pivot) {
+            $number = (int) $pivot['pivotNumber'];
+            $xml .= '<Relationship Id="' . $this->pivotRelationshipId($hasImages, count($sheet->hyperlinks), $sheet->comments !== [], $index) . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable' . $number . '.xml"/>';
+        }
+
         return $xml . '</Relationships>';
     }
 
@@ -1463,6 +1709,11 @@ final class XlsxWriter
     private function commentsVmlRelationshipId(bool $hasImages, int $hyperlinkCount): string
     {
         return 'rId' . (($hasImages ? 1 : 0) + $hyperlinkCount + 2);
+    }
+
+    private function pivotRelationshipId(bool $hasImages, int $hyperlinkCount, bool $hasComments, int $pivotIndex): string
+    {
+        return 'rIdPivot' . ($pivotIndex + 1);
     }
 
     private function commentsXml(WorksheetData $sheet): string
