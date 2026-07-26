@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Mnb\PHPExcel\Reader;
 
 use DateTimeImmutable;
+use Mnb\PHPExcel\Core\RichText;
+use Mnb\PHPExcel\Reader\Formula\PhpSpreadsheetFormulaEvaluator;
+use Mnb\PHPExcel\Reader\State\CellSnapshot;
 use Mnb\PHPExcel\Support\Coordinate;
 use Mnb\PHPExcel\Support\ErrorCode;
 use Mnb\PHPExcel\Support\MnbExcelException;
@@ -181,6 +184,208 @@ final class XlsxReader implements IterableReaderInterface
         return $metadata;
     }
 
+
+    public function readCell(string $path, string $cell, int|string $sheet = 1, array $options = []): mixed
+    {
+        $values = $this->readCells($path, [$cell], $sheet, $options);
+        return $values[strtoupper(trim($cell))] ?? null;
+    }
+
+    /** @return array<string,mixed> keyed by uppercase cell reference */
+    public function readCells(string $path, array $cells, int|string $sheet = 1, array $options = []): array
+    {
+        $this->ensureExtensions();
+        $references = [];
+        foreach ($cells as $cell) {
+            $reference = strtoupper(trim((string) $cell));
+            Coordinate::splitCellRef($reference);
+            $references[] = $reference;
+        }
+        $realPath = realpath($path);
+        if ($realPath === false) {
+            throw new MnbExcelException('Invalid XLSX path: ' . $path);
+        }
+        $sheetPath = $this->resolver->resolveSheetPath($realPath, $sheet);
+        $xmlMap = $this->cellXmlMap($realPath, $sheetPath, $references);
+        $sharedStrings = $this->readSharedStrings($realPath, $options);
+        try {
+            $styleMap = $this->readStyleMap($realPath);
+            $date1904 = $this->usesDate1904($realPath);
+            $result = [];
+            foreach ($references as $reference) {
+                $xml = $xmlMap[$reference] ?? null;
+                if ($xml === null) {
+                    $result[$reference] = null;
+                    continue;
+                }
+                $opening = preg_match('/^<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\b[^>]*>/is', trim($xml), $match) === 1 ? $match[0] : $xml;
+                $type = (string) ($this->stringAttribute($opening, 't') ?? '');
+                $styleIndex = $this->intAttribute($opening, 's');
+                $result[$reference] = $this->cellValueFromXml($xml, $type, $styleIndex, $sharedStrings, $styleMap, $date1904, $options);
+            }
+            return $result;
+        } finally {
+            $sharedStrings->close();
+        }
+    }
+
+    /** @return array<int,array<int,mixed>> */
+    public function readRange(string $path, string $range, int|string $sheet = 1, array $options = []): array
+    {
+        [$start, $end] = $this->normalizeRange($range);
+        [$startColumn, $startRow] = Coordinate::splitCellRef($start);
+        [$endColumn, $endRow] = Coordinate::splitCellRef($end);
+        $options = array_replace($options, [
+            'start_row' => min($startRow, $endRow),
+            'end_row' => max($startRow, $endRow),
+            'start_column' => min($startColumn, $endColumn),
+            'end_column' => max($startColumn, $endColumn),
+            'compact_selected_columns' => true,
+        ]);
+        return array_values($this->readSheet($path, $sheet, $options));
+    }
+
+    public function readCellDetails(string $path, string $cell, int|string $sheet = 1, array $options = []): CellSnapshot
+    {
+        $this->ensureExtensions();
+        $cell = strtoupper(trim($cell));
+        Coordinate::splitCellRef($cell);
+        $realPath = realpath($path);
+        if ($realPath === false) {
+            throw new MnbExcelException('Invalid XLSX path: ' . $path);
+        }
+        $sheetPath = $this->resolver->resolveSheetPath($realPath, $sheet);
+        $cellXml = $this->cellXmlAt($realPath, $sheetPath, $cell);
+        if ($cellXml === null) {
+            return new CellSnapshot($cell, null);
+        }
+
+        $opening = preg_match('/^<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\b[^>]*>/is', trim($cellXml), $openingMatch) === 1 ? $openingMatch[0] : $cellXml;
+        $type = (string) ($this->stringAttribute($opening, 't') ?? '');
+        $styleIndex = $this->intAttribute($opening, 's');
+        $sharedStrings = $this->readSharedStrings($realPath, $options);
+        try {
+            $styleMap = $this->readStyleMap($realPath);
+            $date1904 = $this->usesDate1904($realPath);
+            $value = $this->cellValueFromXml($cellXml, $type, $styleIndex, $sharedStrings, $styleMap, $date1904, $options);
+            $formula = $this->formulaFromXml($cellXml);
+            $cached = $this->cachedCellValue($cellXml, $type, $styleIndex, $sharedStrings, $styleMap, $date1904, $options);
+            $metadata = $this->readSheetMetadata($realPath, $sheet, $options);
+            $richText = null;
+            $richMap = (array) ($metadata['rich_text_objects'] ?? []);
+            if (isset($richMap[$cell]) && $richMap[$cell] instanceof RichText) {
+                $richText = $richMap[$cell];
+            }
+            $comments = array_values(array_filter((array) ($metadata['comments'] ?? []), static fn (array $item): bool => strtoupper((string) ($item['cell'] ?? '')) === $cell));
+            $hyperlinks = array_values(array_filter((array) ($metadata['hyperlinks'] ?? []), static fn (array $item): bool => strtoupper((string) ($item['cell'] ?? $item['ref'] ?? '')) === $cell));
+            $images = array_values(array_filter((array) ($metadata['images'] ?? []), static fn (array $item): bool => strtoupper((string) ($item['cell'] ?? '')) === $cell));
+            $calculated = null;
+            if ((bool) ($options['calculate'] ?? false)) {
+                $calculated = (new PhpSpreadsheetFormulaEvaluator())->calculateCell($realPath, $sheet, $cell);
+            }
+            return new CellSnapshot(
+                $cell,
+                $value,
+                $formula !== null ? '=' . $formula['expression'] : null,
+                $formula !== null ? $cached : null,
+                $calculated,
+                $richText,
+                $styleMap->styleForIndex($styleIndex),
+                $comments,
+                $hyperlinks,
+                $images
+            );
+        } finally {
+            $sharedStrings->close();
+        }
+    }
+
+    /** @return array<string,mixed> */
+    public function readCellStyle(string $path, string $cell, int|string $sheet = 1): array
+    {
+        $this->ensureExtensions();
+        $cell = strtoupper(trim($cell));
+        Coordinate::splitCellRef($cell);
+        $realPath = realpath($path);
+        if ($realPath === false) {
+            throw new MnbExcelException('Invalid XLSX path: ' . $path);
+        }
+        $sheetPath = $this->resolver->resolveSheetPath($realPath, $sheet);
+        $cellXml = $this->cellXmlAt($realPath, $sheetPath, $cell);
+        if ($cellXml === null) {
+            return $this->readStyleMap($realPath)->styleForIndex(null);
+        }
+        $opening = preg_match('/^<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\b[^>]*>/is', trim($cellXml), $match) === 1 ? $match[0] : $cellXml;
+        return $this->readStyleMap($realPath)->styleForIndex($this->intAttribute($opening, 's'));
+    }
+
+    /** @return array<string,array<string,mixed>> */
+    public function readRangeStyles(string $path, string $range, int|string $sheet = 1): array
+    {
+        $this->ensureExtensions();
+        [$start, $end] = $this->normalizeRange($range);
+        [$startColumn, $startRow] = Coordinate::splitCellRef($start);
+        [$endColumn, $endRow] = Coordinate::splitCellRef($end);
+        $realPath = realpath($path);
+        if ($realPath === false) {
+            throw new MnbExcelException('Invalid XLSX path: ' . $path);
+        }
+        $sheetPath = $this->resolver->resolveSheetPath($realPath, $sheet);
+        $cellXmlMap = $this->cellXmlMap($realPath, $sheetPath, null, [
+            min($startColumn, $endColumn),
+            max($startColumn, $endColumn),
+            min($startRow, $endRow),
+            max($startRow, $endRow),
+        ]);
+        $styleMap = $this->readStyleMap($realPath);
+        $styles = [];
+        for ($row = min($startRow, $endRow); $row <= max($startRow, $endRow); $row++) {
+            for ($column = min($startColumn, $endColumn); $column <= max($startColumn, $endColumn); $column++) {
+                $cell = Coordinate::columnIndexToName($column) . $row;
+                $xml = $cellXmlMap[$cell] ?? null;
+                $styleIndex = null;
+                if ($xml !== null) {
+                    $opening = preg_match('/^<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\b[^>]*>/is', trim($xml), $match) === 1 ? $match[0] : $xml;
+                    $styleIndex = $this->intAttribute($opening, 's');
+                }
+                $styles[$cell] = $styleMap->styleForIndex($styleIndex);
+            }
+        }
+        return $styles;
+    }
+
+    public function readRichTextCell(string $path, string $cell, int|string $sheet = 1): ?RichText
+    {
+        $cell = strtoupper(trim($cell));
+        Coordinate::splitCellRef($cell);
+        $metadata = (new XlsxMetadataExtractor($this->resolver))->readSheetMetadata($path, $sheet);
+        $value = ((array) ($metadata['rich_text_objects'] ?? []))[$cell] ?? null;
+        return $value instanceof RichText ? $value : null;
+    }
+
+    /** @return list<array<string,mixed>> */
+    public function images(string $path, int|string $sheet = 1, bool $includeBytes = false): array
+    {
+        return (new XlsxImageExtractor($this->resolver))->images($path, $sheet, $includeBytes);
+    }
+
+    /** @return list<array<string,mixed>> */
+    public function extractImages(string $path, string $directory, int|string $sheet = 1, bool $overwrite = false): array
+    {
+        return (new XlsxImageExtractor($this->resolver))->extract($path, $directory, $sheet, $overwrite);
+    }
+
+    public function calculateCell(string $path, string $cell, int|string $sheet = 1): mixed
+    {
+        return (new PhpSpreadsheetFormulaEvaluator())->calculateCell($path, $sheet, $cell);
+    }
+
+    /** @return array<string,mixed> */
+    public function calculateRange(string $path, string $range, int|string $sheet = 1): array
+    {
+        return (new PhpSpreadsheetFormulaEvaluator())->calculateRange($path, $sheet, $range);
+    }
+
     private function readSharedStrings(string $realPath, array $options = []): SharedStringProviderInterface
     {
         $zip = new ZipArchive();
@@ -347,8 +552,8 @@ final class XlsxReader implements IterableReaderInterface
     /** @return array{expression:string,metadata:array<string,mixed>}|null */
     private function formulaFromXml(string $xml): ?array
     {
-        if (preg_match('/<f\b([^>]*)>(.*?)<\/f>/s', $xml, $match) !== 1
-            && preg_match('/<f\b([^>]*)\/>/s', $xml, $match) !== 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?f\b([^>]*)>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?f>/s', $xml, $match) !== 1
+            && preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?f\b([^>]*)\/>/s', $xml, $match) !== 1) {
             return null;
         }
         $attributes = (string) ($match[1] ?? '');
@@ -417,7 +622,7 @@ final class XlsxReader implements IterableReaderInterface
 
     private function readV(string $xml): ?string
     {
-        if (!preg_match('/<v[^>]*>(.*?)<\/v>/s', $xml, $match)) {
+        if (!preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?v\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?v>/s', $xml, $match)) {
             return null;
         }
 
@@ -426,7 +631,7 @@ final class XlsxReader implements IterableReaderInterface
 
     private function textFromRichXml(string $xml): string
     {
-        preg_match_all('/<t\b[^>]*>(.*?)<\/t>/s', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?t\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?t>/s', $xml, $matches);
         $value = '';
         foreach ($matches[1] ?? [] as $part) {
             $value .= html_entity_decode(strip_tags($part), ENT_QUOTES | ENT_XML1, 'UTF-8');
@@ -535,6 +740,94 @@ final class XlsxReader implements IterableReaderInterface
             $normalized[$index] = true;
         }
         return $normalized;
+    }
+
+    /** @return array{string,string} */
+    private function normalizeRange(string $range): array
+    {
+        $range = strtoupper(trim($range));
+        if (preg_match('/^([A-Z]+\d+)(?::([A-Z]+\d+))?$/', $range, $match) !== 1) {
+            throw new MnbExcelException('Invalid cell range: ' . $range);
+        }
+        return [$match[1], $match[2] ?? $match[1]];
+    }
+
+    /** @return array<string,string> */
+    /**
+     * Stream selected cell XML from a worksheet without materializing the whole sheet part.
+     *
+     * @param list<string>|null $targets
+     * @param array{0:int,1:int,2:int,3:int}|null $bounds minColumn,maxColumn,minRow,maxRow
+     * @return array<string,string>
+     */
+    private function cellXmlMap(string $realPath, string $sheetPath, ?array $targets = null, ?array $bounds = null): array
+    {
+        $wanted = null;
+        if ($targets !== null) {
+            $wanted = [];
+            foreach ($targets as $target) {
+                $wanted[strtoupper(trim($target))] = true;
+            }
+            if ($wanted === []) {
+                return [];
+            }
+        }
+
+        $reader = new XMLReader();
+        if (!@$reader->open($this->zipUri($realPath, $sheetPath), null, LIBXML_NONET | LIBXML_COMPACT)) {
+            throw MnbExcelException::withCode('Unable to open worksheet XML: ' . $sheetPath, ErrorCode::XLSX_INVALID, ['sheet' => $sheetPath]);
+        }
+
+        $cells = [];
+        try {
+            while ($reader->read()) {
+                if ($reader->nodeType !== XMLReader::ELEMENT || $reader->localName !== 'c') {
+                    continue;
+                }
+                $reference = strtoupper((string) $reader->getAttribute('r'));
+                if ($reference === '') {
+                    continue;
+                }
+                if ($wanted !== null && !isset($wanted[$reference])) {
+                    continue;
+                }
+                if ($bounds !== null) {
+                    [$column, $row] = Coordinate::splitCellRef($reference);
+                    if ($column < $bounds[0] || $column > $bounds[1] || $row < $bounds[2] || $row > $bounds[3]) {
+                        continue;
+                    }
+                }
+
+                $outerXml = $reader->readOuterXml();
+                if ($outerXml !== '') {
+                    $cells[$reference] = $outerXml;
+                }
+                if ($wanted !== null) {
+                    unset($wanted[$reference]);
+                    if ($wanted === []) {
+                        break;
+                    }
+                }
+            }
+        } finally {
+            $reader->close();
+        }
+
+        return $cells;
+    }
+
+    private function cellXmlAt(string $realPath, string $sheetPath, string $cell): ?string
+    {
+        $cell = strtoupper(trim($cell));
+        return $this->cellXmlMap($realPath, $sheetPath, [$cell])[$cell] ?? null;
+    }
+
+    private function stringAttribute(string $tag, string $name): ?string
+    {
+        if (preg_match('/\b' . preg_quote($name, '/') . '\s*=\s*(?:"([^"]*)"|\'([^\']*)\')/i', $tag, $match) !== 1) {
+            return null;
+        }
+        return html_entity_decode($match[1] !== '' ? $match[1] : $match[2], ENT_QUOTES | ENT_XML1, 'UTF-8');
     }
 
     private function assertZipEntrySize(string $realPath, string $entry, array $options, string $optionName): void

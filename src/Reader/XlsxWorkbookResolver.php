@@ -92,7 +92,7 @@ final class XlsxWorkbookResolver
                 'index' => $index,
                 'name' => $this->decode($attrs['name'] ?? ('Sheet' . $index)),
                 'sheet_id' => isset($attrs['sheetId']) ? (int) $attrs['sheetId'] : $index,
-                'relationship_id' => $attrs['r:id'] ?? $attrs['id'] ?? ('rId' . $index),
+                'relationship_id' => $this->attributeByLocalName($attrs, 'id') ?? ('rId' . $index),
                 'state' => $attrs['state'] ?? 'visible',
                 'path' => '',
                 'exists' => false,
@@ -165,7 +165,7 @@ final class XlsxWorkbookResolver
     /** @return list<string> */
     private function matchTags(string $xml, string $tag): array
     {
-        preg_match_all('/<' . preg_quote($tag, '/') . '\b[^>]*>/i', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . preg_quote($tag, '/') . '\b[^>]*>/i', $xml, $matches);
         return $matches[0] ?? [];
     }
 
@@ -179,6 +179,20 @@ final class XlsxWorkbookResolver
         }
 
         return $attrs;
+    }
+
+    /** @param array<string,string> $attributes */
+    private function attributeByLocalName(array $attributes, string $localName): ?string
+    {
+        foreach ($attributes as $name => $value) {
+            $separator = strrpos($name, ':');
+            $candidate = $separator === false ? $name : substr($name, $separator + 1);
+            if (strcasecmp($candidate, $localName) === 0) {
+                return $value;
+            }
+        }
+
+        return null;
     }
 
     private function decode(string $value): string

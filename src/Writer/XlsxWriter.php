@@ -24,6 +24,12 @@ final class XlsxWriter
     /** @var array<string,int> */
     private array $styleIds = [];
 
+    /** @var array<int,array<string,mixed>> */
+    private array $differentialStyles = [];
+
+    /** @var array<string,int> */
+    private array $differentialStyleIds = [];
+
     public function write(WorkbookData $workbook, string $path): void
     {
         AtomicFileWriter::writeViaTemp(
@@ -49,7 +55,8 @@ final class XlsxWriter
 
         $this->buildStyleRegistry($workbook);
         $imagePlan = $this->buildImagePlan($workbook);
-        $preservedPackage = $this->loadPreservedPackage($workbook, $imagePlan);
+        $chartPlan = $this->buildChartPlan($workbook);
+        $preservedPackage = $this->loadPreservedPackage($workbook, $imagePlan, $chartPlan);
 
         $zip = new ZipArchive();
         $openResult = $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
@@ -68,38 +75,50 @@ final class XlsxWriter
         };
 
         try {
-            $addXml('[Content_Types].xml', $this->contentTypes($workbook, $imagePlan, $preservedPackage));
+            $addXml('[Content_Types].xml', $this->contentTypes($workbook, $imagePlan, $chartPlan, $preservedPackage));
             $addXml('_rels/.rels', $this->rootRels());
             $addXml('docProps/core.xml', $this->coreProps($workbook->metadata));
             $addXml('docProps/app.xml', $this->appProps($workbook->metadata));
-            $addXml('xl/workbook.xml', $this->workbookXml($workbook));
-            $addXml('xl/_rels/workbook.xml.rels', $this->workbookRels(count($workbook->sheets)));
+            $addXml('xl/workbook.xml', $this->workbookXml($workbook, $preservedPackage));
+            $addXml('xl/_rels/workbook.xml.rels', $this->workbookRels(count($workbook->sheets), $preservedPackage));
             $addXml('xl/styles.xml', $this->stylesXml());
 
             foreach ($workbook->sheets as $index => $sheet) {
                 $sheetNumber = $index + 1;
-                $hasImages = isset($imagePlan[$sheetNumber]) && $imagePlan[$sheetNumber] !== [];
+                $sheetImages = $imagePlan[$sheetNumber] ?? [];
+                $sheetCharts = $chartPlan[$sheetNumber] ?? [];
+                $hasDrawing = $sheetImages !== [] || $sheetCharts !== [];
                 $hasHyperlinks = $sheet->hyperlinks !== [];
                 $hasComments = $sheet->comments !== [];
-                $hasGeneratedSheetRels = $hasImages || $hasHyperlinks || $hasComments;
-                $preservedSheet = (!$hasGeneratedSheetRels && is_array($preservedPackage)) ? ($preservedPackage['sheets'][$sheetNumber] ?? null) : null;
-                $addXml('xl/worksheets/sheet' . $sheetNumber . '.xml', $this->worksheetXml($sheet, $hasImages, is_array($preservedSheet) ? $preservedSheet : null));
+                $hasGeneratedSheetRels = $hasDrawing || $hasHyperlinks || $hasComments;
+                $preservedSheet = is_array($preservedPackage) ? ($preservedPackage['sheets'][$sheetNumber] ?? null) : null;
+                if ($hasGeneratedSheetRels && is_array($preservedSheet) && (bool) ($preservedSheet['requires_relationships'] ?? false)) {
+                    throw new MnbExcelException(
+                        'The selected template sheet contains preserved relationship-backed objects and cannot also receive newly generated images, charts, hyperlinks, or comments in the same write. '
+                        . 'Keep those objects in the template, generate them on another sheet, or disable package preservation for this workbook.'
+                    );
+                }
+                $addXml('xl/worksheets/sheet' . $sheetNumber . '.xml', $this->worksheetXml($sheet, $hasDrawing, is_array($preservedSheet) ? $preservedSheet : null));
 
                 if ($hasGeneratedSheetRels) {
-                    $addXml('xl/worksheets/_rels/sheet' . $sheetNumber . '.xml.rels', $this->sheetRelationships($sheetNumber, $sheet, $hasImages));
+                    $addXml('xl/worksheets/_rels/sheet' . $sheetNumber . '.xml.rels', $this->sheetRelationships($sheetNumber, $sheet, $hasDrawing));
                 } elseif (is_array($preservedSheet) && ($preservedSheet['rels_xml'] ?? '') !== '') {
                     $entry = 'xl/worksheets/_rels/sheet' . $sheetNumber . '.xml.rels';
                     $addXml($entry, (string) $preservedSheet['rels_xml']);
                 }
 
-                if ($hasImages) {
-                    $addXml('xl/drawings/drawing' . $sheetNumber . '.xml', $this->drawingXml($imagePlan[$sheetNumber]));
-                    $addXml('xl/drawings/_rels/drawing' . $sheetNumber . '.xml.rels', $this->drawingRels($imagePlan[$sheetNumber]));
+                if ($hasDrawing) {
+                    $addXml('xl/drawings/drawing' . $sheetNumber . '.xml', $this->drawingXml($sheetImages, $sheetCharts));
+                    $addXml('xl/drawings/_rels/drawing' . $sheetNumber . '.xml.rels', $this->drawingRels($sheetImages, $sheetCharts));
 
-                    foreach ($imagePlan[$sheetNumber] as $image) {
+                    foreach ($sheetImages as $image) {
                         $entry = 'xl/media/' . $image['mediaName'];
                         $this->addFileToZip($zip, $image['path'], $entry);
                         $writtenEntries[$entry] = true;
+                    }
+                    foreach ($sheetCharts as $chart) {
+                        $entry = 'xl/charts/' . $chart['partName'];
+                        $addXml($entry, $this->chartXml($chart, $sheet->name));
                     }
                 }
 
@@ -179,8 +198,15 @@ final class XlsxWriter
     {
         $this->styleEntries = [];
         $this->styleIds = [];
+        $this->differentialStyles = [];
+        $this->differentialStyleIds = [];
 
         foreach ($workbook->sheets as $sheet) {
+            foreach ($sheet->conditionalFormats as $rule) {
+                if (array_key_exists('style', $rule)) {
+                    $this->differentialStyleIdFor($this->resolveStyle($sheet, $rule['style']));
+                }
+            }
             foreach ($sheet->rows as $rowIndex => $row) {
                 $r = $rowIndex + 1;
                 foreach (array_values($row) as $columnIndex => $_value) {
@@ -326,8 +352,47 @@ final class XlsxWriter
         return $plan;
     }
 
-    /** @param array<int, list<array{extension:string}>> $imagePlan @param array<string,mixed>|null $preservedPackage */
-    private function contentTypes(WorkbookData $workbook, array $imagePlan, ?array $preservedPackage = null): string
+    /** @return array<int,list<array<string,mixed>>> */
+    private function buildChartPlan(WorkbookData $workbook): array
+    {
+        $plan = [];
+        $chartNumber = 1;
+        foreach ($workbook->sheets as $sheetIndex => $sheet) {
+            $sheetNumber = $sheetIndex + 1;
+            foreach ($sheet->charts as $chart) {
+                $from = strtoupper((string) ($chart['from'] ?? 'A1'));
+                $to = strtoupper((string) ($chart['to'] ?? 'H16'));
+                Coordinate::splitCellRef($from);
+                Coordinate::splitCellRef($to);
+                $chart['partName'] = 'chart' . $chartNumber . '.xml';
+                $chart['chartNumber'] = $chartNumber;
+                $chart['from'] = $from;
+                $chart['to'] = $to;
+                $plan[$sheetNumber][] = $chart;
+                $chartNumber++;
+            }
+        }
+        return $plan;
+    }
+
+    /** @param array<string,mixed> $style */
+    private function differentialStyleIdFor(array $style): int
+    {
+        $normalized = $this->normalizeStyle($style);
+        $key = json_encode($normalized, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($key === false) {
+            $key = serialize($normalized);
+        }
+        if (!isset($this->differentialStyleIds[$key])) {
+            $id = count($this->differentialStyles);
+            $this->differentialStyleIds[$key] = $id;
+            $this->differentialStyles[$id] = $normalized;
+        }
+        return $this->differentialStyleIds[$key];
+    }
+
+    /** @param array<int, list<array{extension:string}>> $imagePlan @param array<int,list<array<string,mixed>>> $chartPlan @param array<string,mixed>|null $preservedPackage */
+    private function contentTypes(WorkbookData $workbook, array $imagePlan, array $chartPlan, ?array $preservedPackage = null): string
     {
         $sheetCount = count($workbook->sheets);
 
@@ -369,8 +434,11 @@ final class XlsxWriter
         ];
         for ($i = 1; $i <= $sheetCount; $i++) {
             $overrides['/xl/worksheets/sheet' . $i . '.xml'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml';
-            if (isset($imagePlan[$i]) && $imagePlan[$i] !== []) {
+            if ((isset($imagePlan[$i]) && $imagePlan[$i] !== []) || (isset($chartPlan[$i]) && $chartPlan[$i] !== [])) {
                 $overrides['/xl/drawings/drawing' . $i . '.xml'] = 'application/vnd.openxmlformats-officedocument.drawing+xml';
+            }
+            foreach ($chartPlan[$i] ?? [] as $chart) {
+                $overrides['/xl/charts/' . $chart['partName']] = 'application/vnd.openxmlformats-officedocument.drawingml.chart+xml';
             }
             if (($workbook->sheets[$i - 1]->comments ?? []) !== []) {
                 $overrides['/xl/comments' . $i . '.xml'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml';
@@ -401,7 +469,7 @@ final class XlsxWriter
      * @param array<int, list<array{path:string,mediaName:string,extension:string,cell:string,width:int,height:int,name:string}>> $imagePlan
      * @return array<string,mixed>|null
      */
-    private function loadPreservedPackage(WorkbookData $workbook, array $imagePlan): ?array
+    private function loadPreservedPackage(WorkbookData $workbook, array $imagePlan, array $chartPlan = []): ?array
     {
         $settings = $workbook->metadata['_mnb_preserve_xlsx_package'] ?? null;
         if (!is_array($settings) || !isset($settings['path']) || !is_string($settings['path'])) {
@@ -451,11 +519,17 @@ final class XlsxWriter
                 'elements' => $elements,
                 'requires_relationships' => $this->elementsRequireRelationships($elements),
                 'image_conflict' => isset($imagePlan[$sheetNumber]) && $imagePlan[$sheetNumber] !== [],
+                'chart_conflict' => isset($chartPlan[$sheetNumber]) && $chartPlan[$sheetNumber] !== [],
             ];
         }
 
         $contentTypesXml = $zip->getFromName('[Content_Types].xml');
         $contentTypes = $contentTypesXml !== false ? $this->parseContentTypes($contentTypesXml) : ['defaults' => [], 'overrides' => []];
+        $workbookPivot = $this->extractWorkbookPivotState(
+            (string) ($zip->getFromName('xl/workbook.xml') ?: ''),
+            (string) ($zip->getFromName('xl/_rels/workbook.xml.rels') ?: ''),
+            count($workbook->sheets)
+        );
         $entries = [];
         if ((bool) ($settings['copy_package_parts'] ?? true)) {
             for ($i = 0; $i < $zip->numFiles; $i++) {
@@ -474,6 +548,8 @@ final class XlsxWriter
             'sheets' => $sheets,
             'entries' => array_values(array_unique($entries)),
             'content_types' => $contentTypes,
+            'workbook_pivot_caches' => $workbookPivot['pivot_caches'],
+            'workbook_relationships' => $workbookPivot['relationships'],
         ];
     }
 
@@ -499,6 +575,9 @@ final class XlsxWriter
             if ($content === false) {
                 continue;
             }
+            if (str_starts_with(strtolower($entry), 'xl/pivotcache/pivotcachedefinition')) {
+                $content = $this->rebindPivotCacheDefinition($content, (array) ($preservedPackage['settings'] ?? []));
+            }
             $this->addStringToZip($outputZip, $entry, $content);
             $writtenEntries[$entry] = true;
         }
@@ -509,8 +588,17 @@ final class XlsxWriter
     /** @return list<string> */
     private function extractPreservedSheetElements(string $sheetXml): array
     {
-        $elements = [];
+        // Keep the original worksheet-schema order. Reordering preserved elements can
+        // make otherwise valid templates trigger Excel's repair dialog.
         $tags = [
+            'sheetCalcPr',
+            'sheetProtection',
+            'protectedRanges',
+            'scenarios',
+            'sortState',
+            'dataConsolidate',
+            'customSheetViews',
+            'phoneticPr',
             'conditionalFormatting',
             'dataValidations',
             'hyperlinks',
@@ -518,6 +606,12 @@ final class XlsxWriter
             'pageMargins',
             'pageSetup',
             'headerFooter',
+            'rowBreaks',
+            'colBreaks',
+            'customProperties',
+            'cellWatches',
+            'ignoredErrors',
+            'smartTags',
             'drawing',
             'legacyDrawing',
             'legacyDrawingHF',
@@ -526,38 +620,100 @@ final class XlsxWriter
             'controls',
             'webPublishItems',
             'tableParts',
-            'ignoredErrors',
-            'smartTags',
+            'pivotTableParts',
             'extLst',
         ];
 
-        foreach ($tags as $tag) {
-            foreach ($this->extractXmlElements($sheetXml, $tag) as $element) {
-                // These elements should remain behind the regenerated sheetData so comments,
-                // hyperlinks, tables, drawings, validations, and related advanced objects stay linked.
-                $elements[] = $element;
+        $pattern = '/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?(' . implode('|', array_map(static fn (string $tag): string => preg_quote($tag, '/'), $tags)) . ')\b[^>]*(?:\/>|>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?\1>)/isu';
+        preg_match_all($pattern, $sheetXml, $matches, PREG_OFFSET_CAPTURE);
+        $elements = [];
+        foreach ($matches[0] ?? [] as $match) {
+            if (is_array($match) && isset($match[0], $match[1])) {
+                $elements[] = ['xml' => (string) $match[0], 'offset' => (int) $match[1]];
             }
         }
-
-        return $elements;
-    }
-
-    /** @return list<string> */
-    private function extractXmlElements(string $xml, string $tag): array
-    {
-        preg_match_all('/<' . preg_quote($tag, '/') . '\b[^>]*(?:\/>|>.*?<\/' . preg_quote($tag, '/') . '>)/isu', $xml, $matches);
-        return $matches[0] ?? [];
+        usort($elements, static fn (array $a, array $b): int => $a['offset'] <=> $b['offset']);
+        return array_values(array_map(static fn (array $item): string => $item['xml'], $elements));
     }
 
     /** @param list<string> $elements */
     private function elementsRequireRelationships(array $elements): bool
     {
         foreach ($elements as $element) {
-            if (str_contains((string) $element, 'r:id=')) {
+            if (preg_match('/\br:id\s*=/i', (string) $element) === 1) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** @return array{pivot_caches:string,relationships:list<array{id:string,type:string,target:string}>} */
+    private function extractWorkbookPivotState(string $workbookXml, string $relsXml, int $sheetCount): array
+    {
+        if ($workbookXml === '' || $relsXml === '') {
+            return ['pivot_caches' => '', 'relationships' => []];
+        }
+        $relationships = [];
+        $idMap = [];
+        $nextId = $sheetCount + 2;
+        preg_match_all('/<Relationship\b[^>]*\/?\s*>/i', $relsXml, $matches);
+        foreach ($matches[0] ?? [] as $tag) {
+            $attrs = $this->parseXmlAttributes($tag);
+            $type = (string) ($attrs['Type'] ?? '');
+            if (!str_contains(strtolower($type), '/pivotcache')) {
+                continue;
+            }
+            $oldId = (string) ($attrs['Id'] ?? '');
+            $target = (string) ($attrs['Target'] ?? '');
+            if ($oldId === '' || $target === '') {
+                continue;
+            }
+            $newId = 'rId' . $nextId++;
+            $idMap[$oldId] = $newId;
+            $relationships[] = ['id' => $newId, 'type' => $type, 'target' => $target];
+        }
+        if ($relationships === [] || preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?pivotCaches\b[^>]*>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?pivotCaches>/is', $workbookXml, $pivotMatch) !== 1) {
+            return ['pivot_caches' => '', 'relationships' => []];
+        }
+        $pivotCaches = $pivotMatch[0];
+        foreach ($idMap as $oldId => $newId) {
+            $pivotCaches = preg_replace('/(r:id\s*=\s*["\'])' . preg_quote($oldId, '/') . '(["\'])/i', '$1' . $newId . '$2', $pivotCaches) ?? $pivotCaches;
+        }
+        return ['pivot_caches' => $pivotCaches, 'relationships' => $relationships];
+    }
+
+    /** @param array<string,mixed> $settings */
+    private function rebindPivotCacheDefinition(string $xml, array $settings): string
+    {
+        $sheet = trim((string) ($settings['pivot_source_sheet'] ?? ''));
+        $range = strtoupper(trim((string) ($settings['pivot_source_range'] ?? '')));
+        if ($sheet !== '' && $range !== '') {
+            $xml = preg_replace_callback('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?worksheetSource\b([^>]*)\/?\s*>/i', function (array $match) use ($sheet, $range): string {
+                $attrs = $this->parseXmlAttributes('<worksheetSource ' . $match[1] . '>');
+                $attrs['sheet'] = $sheet;
+                $attrs['ref'] = $range;
+                unset($attrs['name']);
+                $text = '<worksheetSource';
+                foreach ($attrs as $name => $value) {
+                    $text .= ' ' . $name . '="' . $this->esc((string) $value) . '"';
+                }
+                return $text . '/>';
+            }, $xml) ?? $xml;
+        }
+        if ((bool) ($settings['pivot_refresh_on_load'] ?? true)) {
+            $xml = preg_replace_callback('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?pivotCacheDefinition\b([^>]*)>/i', function (array $match): string {
+                $attrs = $this->parseXmlAttributes('<pivotCacheDefinition ' . $match[1] . '>');
+                $attrs['refreshOnLoad'] = '1';
+                $attrs['enableRefresh'] = '1';
+                $attrs['refreshedBy'] = 'MNB PHPExcel';
+                $text = '<pivotCacheDefinition';
+                foreach ($attrs as $name => $value) {
+                    $text .= ' ' . $name . '="' . $this->esc((string) $value) . '"';
+                }
+                return $text . '>';
+            }, $xml, 1) ?? $xml;
+        }
+        return $xml;
     }
 
     /** @return array{defaults:array<string,string>,overrides:array<string,string>} */
@@ -664,7 +820,8 @@ final class XlsxWriter
             . '</Relationships>';
     }
 
-    private function workbookRels(int $sheetCount): string
+    /** @param array<string,mixed>|null $preservedPackage */
+    private function workbookRels(int $sheetCount, ?array $preservedPackage = null): string
     {
         $rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
@@ -674,12 +831,17 @@ final class XlsxWriter
         }
 
         $rels .= '<Relationship Id="rId' . ($sheetCount + 1) . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
-        $rels .= '</Relationships>';
-
-        return $rels;
+        foreach ((array) ($preservedPackage['workbook_relationships'] ?? []) as $relationship) {
+            if (!is_array($relationship)) {
+                continue;
+            }
+            $rels .= '<Relationship Id="' . $this->esc((string) $relationship['id']) . '" Type="' . $this->esc((string) $relationship['type']) . '" Target="' . $this->esc((string) $relationship['target']) . '"/>';
+        }
+        return $rels . '</Relationships>';
     }
 
-    private function workbookXml(WorkbookData $workbook): string
+    /** @param array<string,mixed>|null $preservedPackage */
+    private function workbookXml(WorkbookData $workbook, ?array $preservedPackage = null): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
@@ -689,8 +851,12 @@ final class XlsxWriter
             $id = $index + 1;
             $xml .= '<sheet name="' . $this->esc($sheet->name) . '" sheetId="' . $id . '" r:id="rId' . $id . '"/>';
         }
-
-        return $xml . '</sheets></workbook>';
+        $xml .= '</sheets>';
+        $pivotCaches = (string) ($preservedPackage['workbook_pivot_caches'] ?? '');
+        if ($pivotCaches !== '') {
+            $xml .= $pivotCaches;
+        }
+        return $xml . '<calcPr calcId="191029" fullCalcOnLoad="1" forceFullCalc="1"/></workbook>';
     }
 
     /** @param array<string,mixed>|null $preservedSheet */
@@ -706,10 +872,21 @@ final class XlsxWriter
             . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"' . $xmlnsR . '>'
             . '<dimension ref="A1:' . $lastCell . '"/>';
 
-        if ($sheet->freezeHeader) {
-            $freezeRow = $sheet->headerRowIndex ?? 1;
-            $topLeft = 'A' . ($freezeRow + 1);
-            $xml .= '<sheetViews><sheetView workbookViewId="0"><pane ySplit="' . $freezeRow . '" topLeftCell="' . $topLeft . '" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft"/></sheetView></sheetViews>';
+        $freezeRows = $sheet->freezeHeader ? ($sheet->headerRowIndex ?? 1) : max(0, $sheet->freezeRows);
+        $freezeColumns = max(0, $sheet->freezeColumns);
+        if ($freezeRows > 0 || $freezeColumns > 0) {
+            $topLeft = $sheet->freezeTopLeftCell
+                ?? Coordinate::columnIndexToName($freezeColumns + 1) . ($freezeRows + 1);
+            $activePane = $freezeRows > 0 && $freezeColumns > 0
+                ? 'bottomRight'
+                : ($freezeColumns > 0 ? 'topRight' : 'bottomLeft');
+            $pane = '<pane'
+                . ($freezeColumns > 0 ? ' xSplit="' . $freezeColumns . '"' : '')
+                . ($freezeRows > 0 ? ' ySplit="' . $freezeRows . '"' : '')
+                . ' topLeftCell="' . $this->esc($topLeft) . '" activePane="' . $activePane . '" state="frozen"/>';
+            $xml .= '<sheetViews><sheetView workbookViewId="0">' . $pane
+                . '<selection pane="' . $activePane . '" activeCell="' . $this->esc($topLeft) . '" sqref="' . $this->esc($topLeft) . '"/>'
+                . '</sheetView></sheetViews>';
         }
 
         $colsXml = $this->columnsXml($sheet->columnWidths);
@@ -746,7 +923,17 @@ final class XlsxWriter
 
         if ($sheet->autoFilter && $rowCount > 0 && $columnCount > 0) {
             $filterRow = $sheet->headerRowIndex ?? 1;
-            $xml .= '<autoFilter ref="A' . $filterRow . ':' . Coordinate::columnIndexToName($columnCount) . $filterRow . '"/>';
+            $filterRange = $sheet->autoFilterRange
+                ?? ('A' . $filterRow . ':' . Coordinate::columnIndexToName($columnCount) . max($filterRow, $rowCount));
+            $xml .= $this->autoFilterXml($filterRange, $sheet->filterColumns);
+        }
+
+        foreach ($sheet->conditionalFormats as $priority => $rule) {
+            $xml .= $this->conditionalFormattingXml($sheet, $rule, $priority + 1);
+        }
+
+        if ($sheet->dataValidations !== []) {
+            $xml .= $this->dataValidationsXml($sheet->dataValidations);
         }
 
         if ($sheet->hyperlinks !== []) {
@@ -913,6 +1100,12 @@ final class XlsxWriter
         $borders .= '</borders>';
         $xfs .= '</cellXfs>';
 
+        $dxfs = '<dxfs count="' . count($this->differentialStyles) . '">';
+        foreach ($this->differentialStyles as $style) {
+            $dxfs .= $this->dxfXml($style, $customFormats);
+        }
+        $dxfs .= '</dxfs>';
+
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
             . $numFmtXml
@@ -922,6 +1115,7 @@ final class XlsxWriter
             . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
             . $xfs
             . '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+            . $dxfs
             . '</styleSheet>';
     }
 
@@ -930,7 +1124,7 @@ final class XlsxWriter
     {
         $formats = [];
         $nextId = 164;
-        foreach ($this->styleEntries as $style) {
+        foreach (array_merge(array_values($this->styleEntries), array_values($this->differentialStyles)) as $style) {
             $format = $this->formatCode($style['format'] ?? null);
             if ($format === null || $format === '@') {
                 continue;
@@ -1055,6 +1249,171 @@ final class XlsxWriter
         return '<alignment horizontal="' . $horizontal . '" vertical="' . $vertical . '"' . ($wrap ? ' wrapText="1"' : '') . '/>';
     }
 
+    /** @param array<string,int> $customFormats */
+    private function dxfXml(array $style, array $customFormats): string
+    {
+        $xml = '<dxf>';
+        if (isset($style['font'])) {
+            $xml .= $this->fontXml($style);
+        }
+        if (isset($style['fill'])) {
+            $xml .= $this->fillXml($style);
+        }
+        if (isset($style['border'])) {
+            $xml .= $this->borderXml($style);
+        }
+        $format = $this->formatCode($style['format'] ?? null);
+        if ($format !== null) {
+            $numFmtId = $format === '@' ? 49 : ($customFormats[$format] ?? 0);
+            $xml .= '<numFmt numFmtId="' . $numFmtId . '" formatCode="' . $this->esc($format) . '"/>';
+        }
+        $alignment = $this->alignmentXml($style['alignment'] ?? null);
+        if ($alignment !== '') {
+            $xml .= $alignment;
+        }
+        return $xml . '</dxf>';
+    }
+
+    /** @param list<array<string,mixed>> $columns */
+    private function autoFilterXml(string $range, array $columns): string
+    {
+        $xml = '<autoFilter ref="' . $this->esc($range) . '">';
+        [$start] = explode(':', $range, 2);
+        [$startColumn] = Coordinate::splitCellRef($start);
+        foreach ($columns as $criteria) {
+            $column = (int) ($criteria['column'] ?? 0);
+            if ($column < $startColumn) {
+                continue;
+            }
+            $colId = $column - $startColumn;
+            $type = (string) ($criteria['type'] ?? 'values');
+            $xml .= '<filterColumn colId="' . $colId . '">';
+            if ($type === 'values') {
+                $xml .= '<filters' . ((bool) ($criteria['include_blank'] ?? false) ? ' blank="1"' : '') . '>';
+                foreach ((array) ($criteria['values'] ?? []) as $value) {
+                    $xml .= '<filter val="' . $this->esc((string) $value) . '"/>';
+                }
+                $xml .= '</filters>';
+            } elseif ($type === 'custom') {
+                $items = (array) ($criteria['filters'] ?? [$criteria]);
+                $xml .= '<customFilters' . ((bool) ($criteria['and'] ?? false) ? ' and="1"' : '') . '>';
+                foreach ($items as $item) {
+                    if (!is_array($item) || !array_key_exists('value', $item)) {
+                        continue;
+                    }
+                    $operator = (string) ($item['operator'] ?? 'equal');
+                    $xml .= '<customFilter operator="' . $this->esc($operator) . '" val="' . $this->esc((string) $item['value']) . '"/>';
+                }
+                $xml .= '</customFilters>';
+            } elseif ($type === 'top10') {
+                $xml .= '<top10 val="' . max(1, (int) ($criteria['value'] ?? 10)) . '"'
+                    . ((bool) ($criteria['percent'] ?? false) ? ' percent="1"' : '')
+                    . ((bool) ($criteria['bottom'] ?? false) ? ' top="0"' : '') . '/>';
+            } elseif ($type === 'dynamic') {
+                $xml .= '<dynamicFilter type="' . $this->esc((string) ($criteria['dynamic_type'] ?? $criteria['value'] ?? 'today')) . '"/>';
+            } elseif ($type === 'color') {
+                $xml .= '<colorFilter dxfId="' . max(0, (int) ($criteria['dxf_id'] ?? 0)) . '"'
+                    . ((bool) ($criteria['cell_color'] ?? true) ? ' cellColor="1"' : ' cellColor="0"') . '/>';
+            }
+            $xml .= '</filterColumn>';
+        }
+        return $xml . '</autoFilter>';
+    }
+
+    /** @param array<string,mixed> $rule */
+    private function conditionalFormattingXml(WorksheetData $sheet, array $rule, int $priority): string
+    {
+        $type = (string) ($rule['type'] ?? 'expression');
+        $range = (string) ($rule['range'] ?? 'A1');
+        $dxfId = null;
+        if (array_key_exists('style', $rule)) {
+            $dxfId = $this->differentialStyleIdFor($this->resolveStyle($sheet, $rule['style']));
+        }
+        $attrs = ' priority="' . $priority . '"';
+        if ($dxfId !== null) {
+            $attrs .= ' dxfId="' . $dxfId . '"';
+        }
+        $formulaXml = '';
+        foreach ((array) ($rule['formulas'] ?? []) as $formula) {
+            $formulaXml .= '<formula>' . $this->esc(ltrim((string) $formula, '=')) . '</formula>';
+        }
+
+        if ($type === 'cell_is') {
+            $operator = (string) ($rule['operator'] ?? 'equal');
+            $body = '<cfRule type="cellIs" operator="' . $this->esc($operator) . '"' . $attrs . '>' . $formulaXml . '</cfRule>';
+        } elseif ($type === 'expression') {
+            $body = '<cfRule type="expression"' . $attrs . '>' . $formulaXml . '</cfRule>';
+        } elseif ($type === 'color_scale') {
+            $colors = array_values((array) ($rule['colors'] ?? ['#F8696B', '#FFEB84', '#63BE7B']));
+            if (count($colors) < 2) {
+                $colors = ['#F8696B', '#63BE7B'];
+            }
+            $cfvos = count($colors) >= 3
+                ? '<cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>'
+                : '<cfvo type="min"/><cfvo type="max"/>';
+            $colorXml = '';
+            foreach (array_slice($colors, 0, 3) as $color) {
+                $colorXml .= '<color rgb="' . $this->normalizeArgb((string) $color, 'FF638EC6') . '"/>';
+            }
+            $body = '<cfRule type="colorScale"' . $attrs . '><colorScale>' . $cfvos . $colorXml . '</colorScale></cfRule>';
+        } elseif ($type === 'data_bar') {
+            $body = '<cfRule type="dataBar"' . $attrs . '><dataBar showValue="' . ((bool) ($rule['show_value'] ?? true) ? '1' : '0') . '">'
+                . '<cfvo type="min"/><cfvo type="max"/><color rgb="' . $this->normalizeArgb((string) ($rule['color'] ?? '#638EC6'), 'FF638EC6') . '"/>'
+                . '</dataBar></cfRule>';
+        } elseif ($type === 'icon_set') {
+            $iconSet = (string) ($rule['icon_set'] ?? '3TrafficLights1');
+            $body = '<cfRule type="iconSet"' . $attrs . '><iconSet iconSet="' . $this->esc($iconSet) . '" showValue="' . ((bool) ($rule['show_value'] ?? true) ? '1' : '0') . '">'
+                . '<cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/>'
+                . '</iconSet></cfRule>';
+        } elseif ($type === 'top10') {
+            $body = '<cfRule type="top10" rank="' . max(1, (int) ($rule['rank'] ?? 10)) . '"'
+                . ((bool) ($rule['percent'] ?? false) ? ' percent="1"' : '')
+                . ((bool) ($rule['bottom'] ?? false) ? ' bottom="1"' : '') . $attrs . '/>';
+        } elseif ($type === 'duplicate_values' || $type === 'unique_values') {
+            $body = '<cfRule type="' . ($type === 'duplicate_values' ? 'duplicateValues' : 'uniqueValues') . '"' . $attrs . '/>';
+        } elseif ($type === 'contains_text') {
+            $text = (string) ($rule['text'] ?? '');
+            $body = '<cfRule type="containsText" operator="containsText" text="' . $this->esc($text) . '"' . $attrs . '>'
+                . ($formulaXml !== '' ? $formulaXml : '<formula>NOT(ISERROR(SEARCH("' . $this->esc(str_replace('"', '""', $text)) . '",' . explode(':', $range)[0] . ')))</formula>')
+                . '</cfRule>';
+        } else {
+            $body = '<cfRule type="timePeriod" timePeriod="' . $this->esc((string) ($rule['period'] ?? 'today')) . '"' . $attrs . '>' . $formulaXml . '</cfRule>';
+        }
+        return '<conditionalFormatting sqref="' . $this->esc($range) . '">' . $body . '</conditionalFormatting>';
+    }
+
+    /** @param list<array<string,mixed>> $validations */
+    private function dataValidationsXml(array $validations): string
+    {
+        $xml = '<dataValidations count="' . count($validations) . '">';
+        foreach ($validations as $validation) {
+            $type = (string) ($validation['type'] ?? 'custom');
+            $operator = isset($validation['operator']) ? ' operator="' . $this->esc((string) $validation['operator']) . '"' : '';
+            $attrs = ' type="' . $this->esc($type === 'text_length' ? 'textLength' : $type) . '"'
+                . $operator
+                . ' allowBlank="' . ((bool) ($validation['allow_blank'] ?? true) ? '1' : '0') . '"'
+                . ' showInputMessage="' . ((bool) ($validation['show_input'] ?? true) ? '1' : '0') . '"'
+                . ' showErrorMessage="' . ((bool) ($validation['show_error'] ?? true) ? '1' : '0') . '"';
+            foreach (['prompt_title' => 'promptTitle', 'prompt' => 'prompt', 'error_title' => 'errorTitle', 'error' => 'error', 'error_style' => 'errorStyle'] as $key => $attribute) {
+                if (isset($validation[$key]) && $validation[$key] !== null && $validation[$key] !== '') {
+                    $attrs .= ' ' . $attribute . '="' . $this->esc((string) $validation[$key]) . '"';
+                }
+            }
+            $xml .= '<dataValidation' . $attrs . ' sqref="' . $this->esc((string) $validation['range']) . '">';
+            if ($type === 'list' && isset($validation['values'])) {
+                $list = implode(',', array_map(static fn (mixed $value): string => str_replace('"', '""', (string) $value), (array) $validation['values']));
+                $xml .= '<formula1>"' . $this->esc($list) . '"</formula1>';
+            } elseif (isset($validation['formula1'])) {
+                $xml .= '<formula1>' . $this->esc(ltrim((string) $validation['formula1'], '=')) . '</formula1>';
+            }
+            if (isset($validation['formula2'])) {
+                $xml .= '<formula2>' . $this->esc(ltrim((string) $validation['formula2'], '=')) . '</formula2>';
+            }
+            $xml .= '</dataValidation>';
+        }
+        return $xml . '</dataValidations>';
+    }
+
     private function cellInRange(string $cellRef, string $range): bool
     {
         [$cellColumn, $cellRow] = Coordinate::splitCellRef($cellRef);
@@ -1170,22 +1529,26 @@ final class XlsxWriter
         return $xml . '</xml>';
     }
 
-    /** @param list<array{mediaName:string}> $images */
-    private function drawingRels(array $images): string
+    /** @param list<array{mediaName:string}> $images @param list<array<string,mixed>> $charts */
+    private function drawingRels(array $images, array $charts = []): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
         foreach ($images as $index => $image) {
             $xml .= '<Relationship Id="rId' . ($index + 1) . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/' . $this->esc($image['mediaName']) . '"/>';
         }
+        $offset = count($images);
+        foreach ($charts as $index => $chart) {
+            $xml .= '<Relationship Id="rId' . ($offset + $index + 1) . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/' . $this->esc((string) $chart['partName']) . '"/>';
+        }
         return $xml . '</Relationships>';
     }
 
-    /** @param list<array{cell:string,width:int,height:int,name:string}> $images */
-    private function drawingXml(array $images): string
+    /** @param list<array{cell:string,width:int,height:int,name:string}> $images @param list<array<string,mixed>> $charts */
+    private function drawingXml(array $images, array $charts = []): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+            . '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
 
         foreach ($images as $index => $image) {
             [$col, $row] = Coordinate::splitCellRef($image['cell']);
@@ -1201,7 +1564,96 @@ final class XlsxWriter
                 . '<xdr:clientData/></xdr:oneCellAnchor>';
         }
 
+        $relationshipOffset = count($images);
+        foreach ($charts as $index => $chart) {
+            [$fromColumn, $fromRow] = Coordinate::splitCellRef((string) $chart['from']);
+            [$toColumn, $toRow] = Coordinate::splitCellRef((string) $chart['to']);
+            $shapeId = count($images) + $index + 1;
+            $relationshipId = $relationshipOffset + $index + 1;
+            $xml .= '<xdr:twoCellAnchor editAs="twoCell">'
+                . '<xdr:from><xdr:col>' . ($fromColumn - 1) . '</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>' . ($fromRow - 1) . '</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+                . '<xdr:to><xdr:col>' . ($toColumn - 1) . '</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>' . ($toRow - 1) . '</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+                . '<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="' . $shapeId . '" name="' . $this->esc((string) ($chart['title'] ?? ('Chart ' . $shapeId))) . '"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>'
+                . '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
+                . '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rId' . $relationshipId . '"/></a:graphicData></a:graphic>'
+                . '</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>';
+        }
+
         return $xml . '</xdr:wsDr>';
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function chartXml(array $chart, string $sheetName): string
+    {
+        $type = (string) ($chart['type'] ?? 'column');
+        $seriesXml = '';
+        foreach (array_values((array) ($chart['series'] ?? [])) as $index => $series) {
+            $name = (string) ($series['name'] ?? ('Series ' . ($index + 1)));
+            $values = $this->chartFormula((string) $series['values'], $sheetName);
+            $categories = isset($series['categories']) ? $this->chartFormula((string) $series['categories'], $sheetName) : null;
+            $seriesXml .= '<c:ser><c:idx val="' . $index . '"/><c:order val="' . $index . '"/>'
+                . '<c:tx><c:v>' . $this->esc($name) . '</c:v></c:tx>';
+            if ($categories !== null && $categories !== '') {
+                $seriesXml .= ($type === 'scatter'
+                    ? '<c:xVal><c:numRef><c:f>' . $this->esc($categories) . '</c:f></c:numRef></c:xVal>'
+                    : '<c:cat><c:strRef><c:f>' . $this->esc($categories) . '</c:f></c:strRef></c:cat>');
+            }
+            $seriesXml .= ($type === 'scatter'
+                ? '<c:yVal><c:numRef><c:f>' . $this->esc($values) . '</c:f></c:numRef></c:yVal>'
+                : '<c:val><c:numRef><c:f>' . $this->esc($values) . '</c:f></c:numRef></c:val>');
+            $seriesXml .= '</c:ser>';
+        }
+
+        $varyColors = (bool) ($chart['vary_colors'] ?? false) ? '1' : '0';
+        $axisIds = '<c:axId val="48650112"/><c:axId val="48672768"/>';
+        $plot = match ($type) {
+            'bar' => '<c:barChart><c:barDir val="bar"/><c:grouping val="clustered"/><c:varyColors val="' . $varyColors . '"/>' . $seriesXml . $axisIds . '</c:barChart>',
+            'line' => '<c:lineChart><c:grouping val="standard"/><c:varyColors val="' . $varyColors . '"/>' . $seriesXml . '<c:marker val="1"/>' . $axisIds . '</c:lineChart>',
+            'area' => '<c:areaChart><c:grouping val="standard"/><c:varyColors val="' . $varyColors . '"/>' . $seriesXml . $axisIds . '</c:areaChart>',
+            'pie' => '<c:pieChart><c:varyColors val="1"/>' . $seriesXml . '<c:firstSliceAng val="0"/></c:pieChart>',
+            'doughnut' => '<c:doughnutChart><c:varyColors val="1"/>' . $seriesXml . '<c:holeSize val="50"/></c:doughnutChart>',
+            'scatter' => '<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="' . $varyColors . '"/>' . $seriesXml . $axisIds . '</c:scatterChart>',
+            default => '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="' . $varyColors . '"/>' . $seriesXml . $axisIds . '</c:barChart>',
+        };
+        $axes = in_array($type, ['pie', 'doughnut'], true)
+            ? ''
+            : ($type === 'scatter' ? $this->scatterChartAxesXml() : $this->chartAxesXml());
+        $legendPosition = match (strtolower((string) ($chart['legend'] ?? 'right'))) {
+            'left' => 'l', 'top' => 't', 'bottom' => 'b', 'top_right' => 'tr', default => 'r',
+        };
+
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            . '<c:date1904 val="0"/><c:lang val="en-US"/><c:roundedCorners val="0"/><c:style val="' . max(1, min(48, (int) ($chart['style'] ?? 10))) . '"/>'
+            . '<c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>' . $this->esc((string) ($chart['title'] ?? 'Chart')) . '</a:t></a:r></a:p></c:rich></c:tx><c:layout/><c:overlay val="0"/></c:title>'
+            . '<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/>' . $plot . $axes . '</c:plotArea>'
+            . '<c:legend><c:legendPos val="' . $legendPosition . '"/><c:layout/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/><c:showDLblsOverMax val="0"/>'
+            . '</c:chart></c:chartSpace>';
+    }
+
+    private function chartAxesXml(): string
+    {
+        return '<c:catAx><c:axId val="48650112"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="48672768"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/></c:catAx>'
+            . '<c:valAx><c:axId val="48672768"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:numFmt formatCode="General" sourceLinked="1"/><c:tickLblPos val="nextTo"/><c:crossAx val="48650112"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>';
+    }
+
+    private function scatterChartAxesXml(): string
+    {
+        return '<c:valAx><c:axId val="48650112"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:numFmt formatCode="General" sourceLinked="1"/><c:tickLblPos val="nextTo"/><c:crossAx val="48672768"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/></c:valAx>'
+            . '<c:valAx><c:axId val="48672768"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:numFmt formatCode="General" sourceLinked="1"/><c:tickLblPos val="nextTo"/><c:crossAx val="48650112"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/></c:valAx>';
+    }
+
+    private function chartFormula(string $range, string $sheetName): string
+    {
+        $range = trim($range);
+        if ($range === '') {
+            return '';
+        }
+        if (str_contains($range, '!')) {
+            return ltrim($range, '=');
+        }
+        $escapedSheet = str_replace("'", "''", $sheetName);
+        return "'" . $escapedSheet . "'!" . ltrim($range, '=');
     }
 
     /** @param array<string,mixed> $metadata */

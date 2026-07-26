@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Reader;
 
+use Mnb\PHPExcel\Core\RichText;
 use Mnb\PHPExcel\Support\MnbExcelException;
 use ZipArchive;
 
@@ -58,16 +59,24 @@ final class XlsxMetadataExtractor
         $advancedObjects = $this->extractAdvancedObjects($zip, $sheetXml, $relationships);
 
         $zip->close();
+        $richTextObjects = [];
+        foreach ($richText as $item) {
+            $richTextObjects[(string) $item['cell']] = RichText::fromArray((array) ($item['runs'] ?? []));
+        }
+        $images = (new XlsxImageExtractor($this->resolver))->images($realPath, $sheet, false);
 
         return [
             'rich_text' => $richText,
+            'rich_text_objects' => $richTextObjects,
             'comments' => $comments,
             'hyperlinks' => $hyperlinks,
+            'images' => $images,
             'advanced_objects' => $advancedObjects,
             'summary' => [
                 'rich_text_cells' => count($richText),
                 'comments' => count($comments),
                 'hyperlinks' => count($hyperlinks),
+                'images' => count($images),
                 'advanced_object_parts' => count((array) ($advancedObjects['package_parts'] ?? [])),
             ],
         ];
@@ -112,7 +121,7 @@ final class XlsxMetadataExtractor
         }
 
         $strings = [];
-        preg_match_all('/<si\b[^>]*>.*?<\/si>/isu', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?si\b[^>]*>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?si>/isu', $xml, $matches);
         foreach ($matches[0] ?? [] as $siXml) {
             $rich = $this->richTextFromXml($siXml);
             $strings[] = [
@@ -132,7 +141,7 @@ final class XlsxMetadataExtractor
     private function extractRichTextCells(string $sheetXml, array $sharedStrings): array
     {
         $cells = [];
-        preg_match_all('/<c\b[^>]*(?:\/>|>.*?<\/c>)/isu', $sheetXml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\b[^>]*(?:\/>|>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c>)/isu', $sheetXml, $matches);
         foreach ($matches[0] ?? [] as $cellXml) {
             $attrs = $this->parseAttributes($this->openingTag($cellXml));
             $cell = strtoupper((string) ($attrs['r'] ?? ''));
@@ -149,7 +158,7 @@ final class XlsxMetadataExtractor
                     $rich['source'] = 'shared_string';
                     $rich['shared_string_index'] = $index;
                 }
-            } elseif ($type === 'inlineStr' && str_contains($cellXml, '<r')) {
+            } elseif ($type === 'inlineStr' && preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?r\b/i', $cellXml) === 1) {
                 $parsed = $this->richTextFromXml($cellXml);
                 if ($this->hasRichTextFormatting($parsed['runs'])) {
                     $rich = $parsed + ['source' => 'inline_string'];
@@ -174,7 +183,7 @@ final class XlsxMetadataExtractor
     private function extractHyperlinks(string $sheetXml, array $relationships): array
     {
         $hyperlinks = [];
-        if (!preg_match('/<hyperlinks\b[^>]*>(.*?)<\/hyperlinks>/isu', $sheetXml, $container)) {
+        if (!preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?hyperlinks\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?hyperlinks>/isu', $sheetXml, $container)) {
             return [];
         }
 
@@ -228,14 +237,14 @@ final class XlsxMetadataExtractor
             }
 
             $authors = [];
-            if (preg_match('/<authors\b[^>]*>(.*?)<\/authors>/isu', $xml, $authorContainer)) {
-                preg_match_all('/<author\b[^>]*>(.*?)<\/author>/isu', $authorContainer[1], $authorMatches);
+            if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?authors\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?authors>/isu', $xml, $authorContainer)) {
+                preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?author\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?author>/isu', $authorContainer[1], $authorMatches);
                 foreach ($authorMatches[1] ?? [] as $author) {
                     $authors[] = $this->decode($this->stripTags($author));
                 }
             }
 
-            preg_match_all('/<comment\b[^>]*(?:\/>|>.*?<\/comment>)/isu', $xml, $commentMatches);
+            preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?comment\b[^>]*(?:\/>|>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?comment>)/isu', $xml, $commentMatches);
             foreach ($commentMatches[0] ?? [] as $commentXml) {
                 $attrs = $this->parseAttributes($this->openingTag($commentXml));
                 $cell = strtoupper((string) ($attrs['ref'] ?? ''));
@@ -263,7 +272,7 @@ final class XlsxMetadataExtractor
     private function extractThreadedComments(string $xml, string $path): array
     {
         $comments = [];
-        preg_match_all('/<threadedComment\b[^>]*(?:\/>|>.*?<\/threadedComment>)/isu', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?threadedComment\b[^>]*(?:\/>|>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?threadedComment>)/isu', $xml, $matches);
         foreach ($matches[0] ?? [] as $commentXml) {
             $attrs = $this->parseAttributes($this->openingTag($commentXml));
             $cell = strtoupper((string) ($attrs['ref'] ?? ''));
@@ -306,7 +315,7 @@ final class XlsxMetadataExtractor
 
         $sheetElements = [];
         foreach (['drawing', 'legacyDrawing', 'legacyDrawingHF', 'picture', 'tableParts', 'oleObjects', 'controls', 'webPublishItems', 'extLst'] as $tag) {
-            if (preg_match('/<' . preg_quote($tag, '/') . '\b/i', $sheetXml) === 1) {
+            if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . preg_quote($tag, '/') . '\b/i', $sheetXml) === 1) {
                 $sheetElements[] = $tag;
             }
         }
@@ -334,7 +343,7 @@ final class XlsxMetadataExtractor
     private function richTextFromXml(string $xml): array
     {
         $runs = [];
-        preg_match_all('/<r\b[^>]*>.*?<\/r>/isu', $xml, $runMatches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?r\b[^>]*>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?r>/isu', $xml, $runMatches);
         foreach ($runMatches[0] ?? [] as $runXml) {
             $text = $this->textFromTElements($runXml);
             if ($text === '') {
@@ -361,28 +370,30 @@ final class XlsxMetadataExtractor
     /** @return array<string,mixed> */
     private function runProperties(string $runXml): array
     {
-        if (!preg_match('/<rPr\b[^>]*>(.*?)<\/rPr>/isu', $runXml, $match)) {
+        if (!preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?rPr\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?rPr>/isu', $runXml, $match)) {
             return [];
         }
 
         $xml = $match[1];
         $props = [];
-        foreach (['b' => 'bold', 'i' => 'italic', 'strike' => 'strike'] as $tag => $key) {
-            if (preg_match('/<' . $tag . '\b(?:[^>]*val\s*=\s*("0"|"false"|\'0\'|\'false\'))?[^>]*\/>/iu', $xml, $m) === 1 && ($m[1] ?? '') === '') {
-                $props[$key] = true;
+        foreach (['b' => 'bold', 'i' => 'italic', 'strike' => 'strike', 'outline' => 'outline', 'shadow' => 'shadow', 'condense' => 'condense', 'extend' => 'extend'] as $tag => $key) {
+            if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . $tag . '\b([^>]*)\/?\s*>/iu', $xml, $m) === 1) {
+                $attrs = $this->parseAttributes('<' . $tag . ' ' . ($m[1] ?? '') . '>');
+                $value = strtolower((string) ($attrs['val'] ?? '1'));
+                $props[$key] = !in_array($value, ['0', 'false', 'off', 'no'], true);
             }
         }
-        if (preg_match('/<u\b([^>]*)\/>/iu', $xml, $m) === 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?u\b([^>]*)\/>/iu', $xml, $m) === 1) {
             $attrs = $this->parseAttributes('<u' . $m[1] . '/>');
             $props['underline'] = $attrs['val'] ?? true;
         }
-        if (preg_match('/<rFont\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?rFont\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
             $props['font'] = $this->decode($m[2] !== '' ? $m[2] : $m[3]);
         }
-        if (preg_match('/<sz\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?sz\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
             $props['size'] = (float) ($m[2] !== '' ? $m[2] : $m[3]);
         }
-        if (preg_match('/<color\b([^>]*)\/>/iu', $xml, $m) === 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?color\b([^>]*)\/>/iu', $xml, $m) === 1) {
             $attrs = $this->parseAttributes('<color' . $m[1] . '/>');
             foreach (['rgb', 'indexed', 'theme', 'tint'] as $key) {
                 if (isset($attrs[$key])) {
@@ -390,8 +401,14 @@ final class XlsxMetadataExtractor
                 }
             }
         }
-        if (preg_match('/<vertAlign\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?vertAlign\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
             $props['vertical_align'] = $this->decode($m[2] !== '' ? $m[2] : $m[3]);
+        }
+        foreach (['family' => 'family', 'charset' => 'charset', 'scheme' => 'scheme'] as $tag => $key) {
+            if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . $tag . '\b[^>]*val\s*=\s*("([^"]*)"|\'([^\']*)\')/iu', $xml, $m) === 1) {
+                $value = $this->decode($m[2] !== '' ? $m[2] : $m[3]);
+                $props[$key] = is_numeric($value) ? (int) $value : $value;
+            }
         }
 
         return $props;
@@ -413,7 +430,7 @@ final class XlsxMetadataExtractor
 
     private function textFromTElements(string $xml): string
     {
-        preg_match_all('/<t\b[^>]*>(.*?)<\/t>/isu', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?t\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?t>/isu', $xml, $matches);
         $text = '';
         foreach ($matches[1] ?? [] as $part) {
             $text .= $this->decode($this->stripTags($part));
@@ -424,7 +441,7 @@ final class XlsxMetadataExtractor
     /** @return list<string> */
     private function matchTags(string $xml, string $tag): array
     {
-        preg_match_all('/<' . preg_quote($tag, '/') . '\b[^>]*(?:\/>|>.*?<\/' . preg_quote($tag, '/') . '>)/isu', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . preg_quote($tag, '/') . '\b[^>]*(?:\/>|>.*?<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . preg_quote($tag, '/') . '>)/isu', $xml, $matches);
         return $matches[0] ?? [];
     }
 
@@ -449,7 +466,7 @@ final class XlsxMetadataExtractor
 
     private function readValueIndex(string $cellXml): ?int
     {
-        if (preg_match('/<v\b[^>]*>(.*?)<\/v>/isu', $cellXml, $match) !== 1) {
+        if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?v\b[^>]*>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?v>/isu', $cellXml, $match) !== 1) {
             return null;
         }
         $value = trim($this->decode($this->stripTags($match[1])));
