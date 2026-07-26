@@ -11,6 +11,7 @@ use Mnb\PHPExcel\Support\MnbExcelException;
 use PDO;
 use Throwable;
 use Mnb\PHPExcel\Support\Xml\XmlReader;
+use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 /**
  * Shared strings cache for streaming XLSX import.

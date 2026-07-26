@@ -12,6 +12,8 @@ use Mnb\PHPExcel\Support\AtomicFileWriter;
 use Mnb\PHPExcel\Support\Coordinate;
 use Mnb\PHPExcel\Support\ErrorCode;
 use Mnb\PHPExcel\Security\FormulaGuard;
+use Mnb\PHPExcel\Security\DocumentProtection;
+use Mnb\PHPExcel\Security\XlsxEncryption;
 use Mnb\PHPExcel\Support\MnbExcelException;
 use Mnb\PHPExcel\Support\XlsxIntegrityValidator;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
@@ -30,8 +32,33 @@ final class XlsxWriter
     /** @var array<string,int> */
     private array $differentialStyleIds = [];
 
+    /** @var array<string,mixed> */
+    private array $currentWorkbookMetadata = [];
+
     public function write(WorkbookData $workbook, string $path): void
     {
+        $encryption = $workbook->metadata['_mnb_xlsx_encryption'] ?? null;
+        if (is_array($encryption) && (string) ($encryption['password'] ?? '') !== '') {
+            AtomicFileWriter::writeViaTemp($path, function (string $tmp) use ($workbook, $encryption): void {
+                $plain = tempnam(sys_get_temp_dir(), 'mnb_xlsx_plain_');
+                if ($plain === false) {
+                    throw new MnbExcelException('Unable to allocate a temporary XLSX package for encryption.');
+                }
+                try {
+                    $this->writePackage($workbook, $plain);
+                    $this->validateWrittenWorkbook($workbook, $plain);
+                    (new XlsxEncryption())->encryptFile($plain, $tmp, (string) $encryption['password'], $encryption);
+                } finally {
+                    @unlink($plain);
+                }
+            }, static function (string $tmp): void {
+                if (!(new XlsxEncryption())->isEncryptedFile($tmp)) {
+                    throw new MnbExcelException('Encrypted XLSX output did not produce a valid Office encrypted container.');
+                }
+            });
+            return;
+        }
+
         AtomicFileWriter::writeViaTemp(
             $path,
             function (string $tmp) use ($workbook): void {
@@ -45,6 +72,7 @@ final class XlsxWriter
 
     private function writePackage(WorkbookData $workbook, string $path): void
     {
+        $this->currentWorkbookMetadata = $workbook->metadata;
         if (!class_exists(ZipArchive::class)) {
             throw MnbExcelException::withCode(
                 'ext-zip is required to write XLSX files.',
@@ -1043,8 +1071,12 @@ final class XlsxWriter
     private function workbookXml(WorkbookData $workbook, array $pivotPlan, ?array $preservedPackage = null): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            . '<sheets>';
+            . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+        $workbookProtection = $workbook->metadata['_mnb_workbook_protection'] ?? null;
+        if (is_array($workbookProtection) && (string) ($workbookProtection['password'] ?? '') !== '') {
+            $xml .= '<workbookProtection' . $this->xmlAttributes(DocumentProtection::workbookAttributes((string) $workbookProtection['password'], $workbookProtection)) . '/>';
+        }
+        $xml .= '<sheets>';
 
         foreach ($workbook->sheets as $index => $sheet) {
             $id = $index + 1;
@@ -1124,6 +1156,11 @@ final class XlsxWriter
             $xml .= '</row>';
         }
         $xml .= '</sheetData>';
+
+        $sheetProtection = $this->sheetProtectionOptions($sheet->name, $this->currentWorkbookMetadata ?? []);
+        if ($sheetProtection !== null) {
+            $xml .= '<sheetProtection' . $this->xmlAttributes(DocumentProtection::sheetAttributes((string) $sheetProtection['password'], $sheetProtection)) . '/>';
+        }
 
         if ($sheet->mergeCells !== []) {
             $xml .= '<mergeCells count="' . count($sheet->mergeCells) . '">';
@@ -1936,6 +1973,27 @@ final class XlsxWriter
             . '<Application>MNB PHPExcel</Application>'
             . ($company !== '' ? '<Company>' . $this->esc($company) . '</Company>' : '')
             . '</Properties>';
+    }
+
+    /** @param array<string,mixed> $metadata @return array<string,mixed>|null */
+    private function sheetProtectionOptions(string $sheetName, array $metadata): ?array
+    {
+        $protections = $metadata['_mnb_sheet_protection'] ?? null;
+        if (!is_array($protections)) {
+            return null;
+        }
+        $settings = $protections[$sheetName] ?? $protections['*'] ?? null;
+        return is_array($settings) && (string) ($settings['password'] ?? '') !== '' ? $settings : null;
+    }
+
+    /** @param array<string,string> $attributes */
+    private function xmlAttributes(array $attributes): string
+    {
+        $xml = '';
+        foreach ($attributes as $name => $value) {
+            $xml .= ' ' . $name . '="' . $this->esc($value) . '"';
+        }
+        return $xml;
     }
 
     private function esc(string $value): string

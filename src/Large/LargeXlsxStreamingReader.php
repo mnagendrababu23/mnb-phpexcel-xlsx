@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mnb\PHPExcel\Large;
 
 use Mnb\PHPExcel\Reader\XlsxStyleMap;
+use Mnb\PHPExcel\Security\XlsxEncryption;
 use Mnb\PHPExcel\Reader\SharedStrings\SharedStringProviderInterface;
 use Mnb\PHPExcel\Reader\XlsxWorkbookResolver;
 use Mnb\PHPExcel\Support\ErrorCode;
@@ -33,6 +34,31 @@ final class LargeXlsxStreamingReader
      */
     public function chunk(string $path, int $chunkSize, callable $callback, array $options = []): array
     {
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $password = (string) ($options['password'] ?? '');
+            if ($password === '') {
+                throw new MnbExcelException('A password is required to stream this encrypted XLSX file.');
+            }
+            $temporary = $encryption->decryptToTemporary($path, $password, $options);
+            $plainOptions = $options;
+            unset($plainOptions['password']);
+            $wrappedCallback = static function (array $rows, array $state) use ($callback, $path): bool|null {
+                $state['path'] = $path;
+                $state['encrypted_source'] = true;
+                $result = $callback($rows, $state);
+                return is_bool($result) ? $result : null;
+            };
+            try {
+                $state = $this->chunk($temporary, $chunkSize, $wrappedCallback, $plainOptions);
+                $state['path'] = $path;
+                $state['encrypted_source'] = true;
+                return $state;
+            } finally {
+                @unlink($temporary);
+            }
+        }
+
         $this->ensureExtensions();
         if ($chunkSize < 1) {
             throw MnbExcelException::withCode('Chunk size must be greater than zero.', ErrorCode::INVALID_ARGUMENT);

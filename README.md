@@ -1,6 +1,6 @@
 # mnb/mnb-phpexcel-xlsx
 
-Native XLSX reader/writer, formula engine, pivot generation, and low-memory streaming module for MNB PHPExcel.
+Native XLSX reader/writer with password encryption, document protection, formulas, pivots, and low-memory streaming for MNB PHPExcel.
 
 This package is generated from the MNB PHPExcel monorepo. Do not copy source files between modules manually.
 

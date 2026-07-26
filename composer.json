@@ -1,11 +1,13 @@
 {
     "name": "mnb/mnb-phpexcel-xlsx",
-    "description": "Native XLSX reader/writer, formula engine, pivot generation, and low-memory streaming module for MNB PHPExcel.",
+    "description": "Native XLSX reader/writer with password encryption, document protection, formulas, pivots, and low-memory streaming for MNB PHPExcel.",
     "type": "library",
     "license": "MIT",
     "require": {
         "php": ">=8.1",
-        "mnb/mnb-phpexcel-core": "^1.6"
+        "ext-iconv": "*",
+        "ext-openssl": "*",
+        "mnb/mnb-phpexcel-core": "^1.7"
     },
     "minimum-stability": "stable",
     "prefer-stable": true,

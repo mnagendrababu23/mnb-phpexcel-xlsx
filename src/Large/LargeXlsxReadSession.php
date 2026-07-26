@@ -27,6 +27,16 @@ final class LargeXlsxReadSession
         return $clone;
     }
 
+    public function password(string $password): self
+    {
+        if ($password === '') {
+            throw new \InvalidArgumentException('Workbook password cannot be empty.');
+        }
+        $clone = clone $this;
+        $clone->options['password'] = $password;
+        return $clone;
+    }
+
     public function withHeader(bool $enabled = true): self
     {
         $clone = clone $this;

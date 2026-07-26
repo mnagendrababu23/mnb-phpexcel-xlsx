@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Support;
 
+use Mnb\PHPExcel\Security\XlsxEncryption;
 use Mnb\PHPExcel\Support\Xml\XmlReader;
 
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
@@ -37,20 +38,35 @@ final class XlsxIntegrityValidator
         $this->entries = [];
 
         $path = (string) $path;
+        $originalPath = $path;
+        $temporary = null;
         if ($path === '' || !is_file($path)) {
             $this->fail('file_exists', 'XLSX file not found: ' . $path);
             return $this->result($path);
         }
 
-        if (!class_exists(ZipArchive::class)) {
-            $this->fail('zip_extension', 'ext-zip is required to validate XLSX package integrity.');
-            return $this->result($path);
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $password = (string) ($options['password'] ?? $options['xlsx_password'] ?? '');
+            if ($password === '') {
+                $this->fail('password_required', 'A password is required to validate this encrypted XLSX file.');
+                return $this->result($originalPath);
+            }
+            try {
+                $temporary = $encryption->decryptToTemporary($path, $password, $options);
+                $path = $temporary;
+                $this->pass('encrypted_package', 'Encrypted XLSX package was opened for integrity validation.');
+            } catch (\Throwable $e) {
+                $this->fail('encrypted_package', 'Encrypted XLSX package could not be opened with the supplied password.');
+                return $this->result($originalPath);
+            }
         }
 
         $zip = new ZipArchive();
         if ($zip->open($path) !== true) {
-            $this->fail('zip_open', 'Unable to open XLSX as a ZIP package: ' . $path);
-            return $this->result($path);
+            $this->fail('zip_open', 'Unable to open XLSX as a ZIP package: ' . $originalPath);
+            if ($temporary !== null) { @unlink($temporary); }
+            return $this->result($originalPath);
         }
 
         try {
@@ -66,7 +82,9 @@ final class XlsxIntegrityValidator
             $zip->close();
         }
 
-        return $this->result($path);
+        $result = $this->result($originalPath);
+        if ($temporary !== null) { @unlink($temporary); }
+        return $result;
     }
 
     /**

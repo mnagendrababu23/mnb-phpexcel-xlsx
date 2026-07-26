@@ -12,6 +12,7 @@ use Mnb\PHPExcel\Reader\Options\ReaderOptions;
 use Mnb\PHPExcel\Reader\ReadSession;
 use Mnb\PHPExcel\Reader\XlsxReader;
 use Mnb\PHPExcel\Writer\XlsxWriter;
+use Mnb\PHPExcel\Security\XlsxEncryption;
 
 final class Xlsx
 {
@@ -37,15 +38,44 @@ final class Xlsx
         return self::read($path, $options)->sheet($sheet)->rangeValues($range);
     }
 
-    public static function richText(string $path, string $cell, int|string $sheet = 1): ?RichText
+    public static function richText(string $path, string $cell, int|string $sheet = 1, array|ReaderOptions $options = []): ?RichText
     {
-        return self::read($path)->sheet($sheet)->richText($cell);
+        return self::read($path, $options)->sheet($sheet)->richText($cell);
     }
 
     /** @return list<array<string,mixed>> */
-    public static function images(string $path, int|string $sheet = 1, bool $includeBytes = false): array
+    public static function images(string $path, int|string $sheet = 1, bool $includeBytes = false, array|ReaderOptions $options = []): array
     {
-        return self::read($path)->sheet($sheet)->images($includeBytes);
+        return self::read($path, $options)->sheet($sheet)->images($includeBytes);
+    }
+
+    public static function isEncrypted(string $path): bool
+    {
+        return (new XlsxEncryption())->isEncryptedFile($path);
+    }
+
+    /** Return agile, standard, unknown, or null when the file is not encrypted. */
+    public static function encryptionMode(string $path): ?string
+    {
+        return (new XlsxEncryption())->encryptionMode($path);
+    }
+
+    /** @param array<string,mixed> $options */
+    public static function encryptFile(string $source, string $destination, string $password, array $options = []): void
+    {
+        (new XlsxEncryption())->encryptFile($source, $destination, $password, $options);
+    }
+
+    /** @param array<string,mixed> $options */
+    public static function decryptFile(string $source, string $destination, string $password, array $options = []): void
+    {
+        (new XlsxEncryption())->decryptFile($source, $destination, $password, $options);
+    }
+
+    /** @return array<string,mixed> */
+    public static function protection(string $path, int|string $sheet = 1, array|ReaderOptions $options = []): array
+    {
+        return self::read($path, $options)->sheet($sheet)->protection();
     }
 
     /** Create a styled, validated XLSX import template. @param array<int|string,string|array<string,mixed>> $columns */
@@ -62,6 +92,25 @@ final class Xlsx
             (string) ($options['sheet_name'] ?? 'Sheet1'),
             (bool) ($options['with_header'] ?? false)
         );
+        $password = (string) ($options['password'] ?? $options['encryption_password'] ?? '');
+        if ($password !== '') {
+            $encryptionOptions = (array) ($options['encryption_options'] ?? []);
+            foreach (['mode', 'encryption_mode', 'compatibility_mode', 'spin_count'] as $key) {
+                if (array_key_exists($key, $options)) {
+                    $encryptionOptions[$key] = $options[$key];
+                }
+            }
+            $workbook->metadata['_mnb_xlsx_encryption'] = array_replace($encryptionOptions, ['password' => $password]);
+        }
+        $protectionPassword = (string) ($options['protection_password'] ?? '');
+        if ($protectionPassword !== '') {
+            if ((bool) ($options['protect_workbook'] ?? true)) {
+                $workbook->metadata['_mnb_workbook_protection'] = array_replace((array) ($options['workbook_protection'] ?? []), ['password' => $protectionPassword]);
+            }
+            if ((bool) ($options['protect_sheets'] ?? true)) {
+                $workbook->metadata['_mnb_sheet_protection'] = ['*' => array_replace((array) ($options['sheet_protection'] ?? []), ['password' => $protectionPassword])];
+            }
+        }
         (new XlsxWriter())->write($workbook, $path);
     }
 }

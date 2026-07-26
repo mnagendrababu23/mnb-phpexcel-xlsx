@@ -18,6 +18,7 @@ use Mnb\PHPExcel\Reader\State\FormulaResult;
 use Mnb\PHPExcel\Support\XlsxIntegrityValidator;
 use Mnb\PHPExcel\Support\Xml\XmlReader;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
+use Mnb\PHPExcel\Security\XlsxEncryption;
 
 final class XlsxReader implements IterableReaderInterface
 {
@@ -39,6 +40,23 @@ final class XlsxReader implements IterableReaderInterface
     /** @return \Generator<int,list<mixed>> */
     public function iterateSheet(string $path, int|string $sheet = 1, array $options = []): iterable
     {
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $password = (string) ($options['password'] ?? '');
+            if ($password === '') {
+                throw new MnbExcelException('A password is required to read this encrypted XLSX file.');
+            }
+            $temporary = $encryption->decryptToTemporary($path, $password, $options);
+            $plainOptions = $options;
+            unset($plainOptions['password']);
+            try {
+                yield from $this->iterateSheet($temporary, $sheet, $plainOptions);
+            } finally {
+                @unlink($temporary);
+            }
+            return;
+        }
+
         $this->ensureExtensions();
 
         $realPath = realpath($path);
@@ -166,6 +184,12 @@ final class XlsxReader implements IterableReaderInterface
     }
 
 
+    /** @param array<string,mixed> $options @return array<string,mixed> */
+    public function readProtection(string $path, int|string $sheet = 1, array $options = []): array
+    {
+        return (new XlsxProtectionReader($this->resolver))->read($path, $sheet, $options);
+    }
+
     /**
      * Read non-tabular XLSX metadata for a sheet: rich text runs, comments, hyperlinks, and advanced object inventory.
      *
@@ -173,6 +197,17 @@ final class XlsxReader implements IterableReaderInterface
      */
     public function readSheetMetadata(string $path, int|string $sheet = 1, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                $plainOptions = $options;
+                unset($plainOptions['password']);
+                return $this->readSheetMetadata($resolvedPath, $sheet, $plainOptions);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         $metadata = (new XlsxMetadataExtractor($this->resolver))->readSheetMetadata($path, $sheet);
         $realPath = realpath($path);
         if ($realPath !== false && class_exists(ZipArchive::class)) {
@@ -194,6 +229,17 @@ final class XlsxReader implements IterableReaderInterface
     /** @return array<string,mixed> keyed by uppercase cell reference */
     public function readCells(string $path, array $cells, int|string $sheet = 1, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                $plainOptions = $options;
+                unset($plainOptions['password']);
+                return $this->readCells($resolvedPath, $cells, $sheet, $plainOptions);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         $this->ensureExtensions();
         $references = [];
         foreach ($cells as $cell) {
@@ -247,6 +293,17 @@ final class XlsxReader implements IterableReaderInterface
 
     public function readCellDetails(string $path, string $cell, int|string $sheet = 1, array $options = []): CellSnapshot
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                $plainOptions = $options;
+                unset($plainOptions['password']);
+                return $this->readCellDetails($resolvedPath, $cell, $sheet, $plainOptions);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         $this->ensureExtensions();
         $cell = strtoupper(trim($cell));
         Coordinate::splitCellRef($cell);
@@ -301,8 +358,17 @@ final class XlsxReader implements IterableReaderInterface
     }
 
     /** @return array<string,mixed> */
-    public function readCellStyle(string $path, string $cell, int|string $sheet = 1): array
+    public function readCellStyle(string $path, string $cell, int|string $sheet = 1, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->readCellStyle($resolvedPath, $cell, $sheet, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         $this->ensureExtensions();
         $cell = strtoupper(trim($cell));
         Coordinate::splitCellRef($cell);
@@ -320,8 +386,17 @@ final class XlsxReader implements IterableReaderInterface
     }
 
     /** @return array<string,array<string,mixed>> */
-    public function readRangeStyles(string $path, string $range, int|string $sheet = 1): array
+    public function readRangeStyles(string $path, string $range, int|string $sheet = 1, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->readRangeStyles($resolvedPath, $range, $sheet, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         $this->ensureExtensions();
         [$start, $end] = $this->normalizeRange($range);
         [$startColumn, $startRow] = Coordinate::splitCellRef($start);
@@ -354,8 +429,17 @@ final class XlsxReader implements IterableReaderInterface
         return $styles;
     }
 
-    public function readRichTextCell(string $path, string $cell, int|string $sheet = 1): ?RichText
+    public function readRichTextCell(string $path, string $cell, int|string $sheet = 1, array $options = []): ?RichText
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->readRichTextCell($resolvedPath, $cell, $sheet, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         $cell = strtoupper(trim($cell));
         Coordinate::splitCellRef($cell);
         $metadata = (new XlsxMetadataExtractor($this->resolver))->readSheetMetadata($path, $sheet);
@@ -364,25 +448,61 @@ final class XlsxReader implements IterableReaderInterface
     }
 
     /** @return list<array<string,mixed>> */
-    public function images(string $path, int|string $sheet = 1, bool $includeBytes = false): array
+    public function images(string $path, int|string $sheet = 1, bool $includeBytes = false, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->images($resolvedPath, $sheet, $includeBytes, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         return (new XlsxImageExtractor($this->resolver))->images($path, $sheet, $includeBytes);
     }
 
     /** @return list<array<string,mixed>> */
-    public function extractImages(string $path, string $directory, int|string $sheet = 1, bool $overwrite = false): array
+    public function extractImages(string $path, string $directory, int|string $sheet = 1, bool $overwrite = false, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->extractImages($resolvedPath, $directory, $sheet, $overwrite, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         return (new XlsxImageExtractor($this->resolver))->extract($path, $directory, $sheet, $overwrite);
     }
 
-    public function calculateCell(string $path, string $cell, int|string $sheet = 1): mixed
+    public function calculateCell(string $path, string $cell, int|string $sheet = 1, array $options = []): mixed
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->calculateCell($resolvedPath, $cell, $sheet, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         return FormulaEvaluatorFactory::create()->calculateCell($path, $sheet, $cell);
     }
 
     /** @return array<string,mixed> */
-    public function calculateRange(string $path, string $range, int|string $sheet = 1): array
+    public function calculateRange(string $path, string $range, int|string $sheet = 1, array $options = []): array
     {
+        [$resolvedPath, $temporary] = $this->resolveReadablePath($path, $options);
+        if ($temporary !== null) {
+            try {
+                return $this->calculateRange($resolvedPath, $range, $sheet, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+        $path = $resolvedPath;
         return FormulaEvaluatorFactory::create()->calculateRange($path, $sheet, $range);
     }
 
@@ -870,6 +990,21 @@ final class XlsxReader implements IterableReaderInterface
         $exists = $zip->locateName($entry) !== false;
         $zip->close();
         return $exists;
+    }
+
+    /** @param array<string,mixed> $options @return array{0:string,1:?string} */
+    private function resolveReadablePath(string $path, array $options = []): array
+    {
+        $encryption = new XlsxEncryption();
+        if (!$encryption->isEncryptedFile($path)) {
+            return [$path, null];
+        }
+        $password = (string) ($options['password'] ?? '');
+        if ($password === '') {
+            throw new MnbExcelException('A password is required to read this encrypted XLSX file.');
+        }
+        $temporary = $encryption->decryptToTemporary($path, $password, $options);
+        return [$temporary, $temporary];
     }
 
     private function ensureExtensions(): void

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Application;
 
+use Mnb\PHPExcel\Security\XlsxEncryption;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class UploadSafetyValidator
@@ -113,6 +114,8 @@ final class UploadSafetyValidator
                 'application/x-zip',
                 'application/x-zip-compressed',
                 'application/octet-stream',
+                'application/x-ole-storage',
+                'application/vnd.ms-office',
             ],
             'csv', 'tsv' => ['text/csv', 'text/tab-separated-values', 'text/plain', 'application/csv', 'application/vnd.ms-excel', 'application/octet-stream'],
             'xls' => ['application/vnd.ms-excel', 'application/x-ole-storage', 'application/octet-stream'],
@@ -126,13 +129,43 @@ final class UploadSafetyValidator
     /** @param array<string,mixed> $options @param array<string,mixed> $features @param list<string> $warnings @param list<string> $errors */
     private static function inspectXlsxPackage(string $path, array $options, array &$features, array &$warnings, array &$errors): void
     {
-        if (!class_exists(ZipArchive::class)) {
-            $warnings[] = 'ext-zip is missing; XLSX ZIP structure could not be checked.';
-            return;
+        $inspectionPath = $path;
+        $temporary = null;
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $features['encrypted'] = true;
+            $features['encrypted_container'] = 'ole-cfb';
+            $password = (string) ($options['password'] ?? $options['xlsx_password'] ?? '');
+            if ($password === '') {
+                $message = 'A password is required to inspect the encrypted XLSX package.';
+                if ((bool) ($options['require_password_for_encrypted'] ?? $options['reject_encrypted'] ?? true)) {
+                    $errors[] = $message;
+                } else {
+                    $warnings[] = $message . ' Inner package safety checks were skipped.';
+                }
+                return;
+            }
+
+            try {
+                $decryptOptions = $options;
+                $decryptOptions['max_decrypted_bytes'] = max(
+                    1,
+                    (int) ($options['max_decrypted_bytes'] ?? (($options['max_uncompressed_size_mb'] ?? 1024) * 1024 * 1024))
+                );
+                $temporary = $encryption->decryptToTemporary($path, $password, $decryptOptions);
+                $inspectionPath = $temporary;
+                $features['decrypted_for_validation'] = true;
+            } catch (\Throwable $e) {
+                $errors[] = 'Encrypted XLSX could not be opened with the supplied password.';
+                return;
+            }
         }
 
         $zip = new ZipArchive();
-        if ($zip->open($path) !== true) {
+        if ($zip->open($inspectionPath) !== true) {
+            if ($temporary !== null) {
+                @unlink($temporary);
+            }
             $errors[] = 'XLSX upload is not a readable ZIP package.';
             return;
         }
@@ -202,7 +235,7 @@ final class UploadSafetyValidator
             $features['encrypted_entries'] = $encryptedEntries;
             $features['macros'] = $zip->locateName('xl/vbaProject.bin') !== false;
             $features['external_links'] = self::hasPrefix($zip, 'xl/externalLinks/');
-            $features['encrypted'] = $zip->locateName('EncryptedPackage') !== false || $encryptedEntries > 0;
+            $features['encrypted'] = (bool) ($features['encrypted'] ?? false) || $encryptedEntries > 0;
 
             if ($totalUncompressed > $maxUncompressedBytes) {
                 $errors[] = 'XLSX ZIP expands beyond the allowed uncompressed size of ' . (int) ceil($maxUncompressedBytes / 1024 / 1024) . ' MB.';
@@ -239,9 +272,9 @@ final class UploadSafetyValidator
                     $warnings[] = $message;
                 }
             }
-            if ($features['encrypted']) {
-                $message = 'Encrypted workbook package content detected.';
-                if ((bool) ($options['reject_encrypted'] ?? true)) {
+            if ($encryptedEntries > 0) {
+                $message = 'ZIP-entry encryption inside the decrypted XLSX package is unsupported.';
+                if ((bool) ($options['reject_encrypted_entries'] ?? true)) {
                     $errors[] = $message;
                 } else {
                     $warnings[] = $message;
@@ -249,6 +282,9 @@ final class UploadSafetyValidator
             }
         } finally {
             $zip->close();
+            if ($temporary !== null) {
+                @unlink($temporary);
+            }
         }
     }
 

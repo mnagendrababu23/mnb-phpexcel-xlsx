@@ -7,6 +7,7 @@ namespace Mnb\PHPExcel\Reader;
 use Mnb\PHPExcel\Support\MnbExcelException;
 use Mnb\PHPExcel\Support\Xml\XmlReader;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
+use Mnb\PHPExcel\Security\XlsxEncryption;
 
 final class XlsxInspector
 {
@@ -30,8 +31,33 @@ final class XlsxInspector
      *   errors:list<string>
      * }
      */
-    public function inspect(string $path): array
+    public function inspect(string $path, array $options = []): array
     {
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $password = (string) ($options['password'] ?? '');
+            if ($password === '') {
+                return [
+                    'status' => 'password_required',
+                    'file' => $path,
+                    'size_bytes' => is_file($path) ? (int) filesize($path) : 0,
+                    'encrypted' => true,
+                    'sheets' => [],
+                    'warnings' => [],
+                    'errors' => ['A password is required to inspect this encrypted XLSX file.'],
+                ];
+            }
+            $temporary = $encryption->decryptToTemporary($path, $password, $options);
+            try {
+                $result = $this->inspect($temporary, []);
+                $result['file'] = $path;
+                $result['size_bytes'] = is_file($path) ? (int) filesize($path) : 0;
+                $result['encrypted'] = true;
+                return $result;
+            } finally {
+                @unlink($temporary);
+            }
+        }
         $realPath = realpath($path);
         $warnings = [];
         $errors = [];
@@ -67,7 +93,7 @@ final class XlsxInspector
 
         $result['encrypted'] = $zip->locateName('EncryptionInfo') !== false || $zip->locateName('EncryptedPackage') !== false;
         if ($result['encrypted']) {
-            $errors[] = 'Encrypted/password-protected XLSX files are not supported.';
+            $errors[] = 'Unexpected encrypted entries were found inside the OOXML ZIP package.';
         }
 
         foreach (['[Content_Types].xml', '_rels/.rels', 'xl/workbook.xml', 'xl/_rels/workbook.xml.rels'] as $entry) {
@@ -139,8 +165,21 @@ final class XlsxInspector
     }
 
     /** @return list<string> */
-    public function sheetNames(string $path): array
+    public function sheetNames(string $path, array $options = []): array
     {
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $password = (string) ($options['password'] ?? '');
+            if ($password === '') {
+                throw new MnbExcelException('A password is required to read this encrypted XLSX file.');
+            }
+            $temporary = $encryption->decryptToTemporary($path, $password, $options);
+            try {
+                return $this->sheetNames($temporary, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
         $realPath = realpath($path);
         if ($realPath === false) {
             throw new MnbExcelException('Invalid XLSX path: ' . $path);
