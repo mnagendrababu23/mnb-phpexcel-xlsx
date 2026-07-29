@@ -56,3 +56,32 @@ try {
     print_r($e->toErrorArray(debug: true));
 }
 ```
+
+
+## Sheet discovery, active sheet, and empty worksheets
+
+```php
+$session = Xlsx::read('report.xlsx');
+
+if (!$session->hasSheet('Orders')) {
+    $session = $session->activeSheet();
+} else {
+    $session = $session->sheet('Orders');
+}
+
+echo $session->activeSheetName();
+print_r($session->activeSheetInfo());
+
+$data = $session->withHeaderRow(1);
+if ($data->isEmpty()) {
+    // The worksheet has zero data rows after the header/options are applied.
+    return;
+}
+
+$data->assertHasRows();
+foreach ($data->rows() as $row) {
+    // Process data.
+}
+```
+
+`inspect()` now includes an `active_sheet` entry with a 1-based index and worksheet name. XLSX active-sheet detection reads the workbook's `activeTab`; workbooks without that metadata safely fall back to the first worksheet.

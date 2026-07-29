@@ -35,6 +35,33 @@ final class XlsxWorkbookResolver
         return $sheets;
     }
 
+    /** @return array{index:int,name:string} */
+    public function activeSheet(string $realPath): array
+    {
+        $sheets = $this->sheets($realPath);
+        if ($sheets === []) {
+            throw new MnbExcelException('Workbook does not contain any sheets.');
+        }
+
+        $zip = $this->openZip($realPath);
+        $workbookXml = $zip->getFromName('xl/workbook.xml');
+        $zip->close();
+
+        $activeTab = 0;
+        if (is_string($workbookXml) && preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?workbookView\b[^>]*>/i', $workbookXml, $match) === 1) {
+            $attrs = $this->parseAttributes($match[0]);
+            if (isset($attrs['activeTab']) && ctype_digit((string) $attrs['activeTab'])) {
+                $activeTab = (int) $attrs['activeTab'];
+            }
+        }
+
+        $activeTab = min(max(0, $activeTab), count($sheets) - 1);
+        return [
+            'index' => $activeTab + 1,
+            'name' => $sheets[$activeTab]['name'],
+        ];
+    }
+
     public function resolveSheetPath(string $realPath, int|string $sheet): string
     {
         if (is_string($sheet)) {

@@ -20,7 +20,7 @@ use Mnb\PHPExcel\Support\Xml\XmlReader;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
 use Mnb\PHPExcel\Security\XlsxEncryption;
 
-final class XlsxReader implements AdvancedReaderInterface
+final class XlsxReader implements AdvancedReaderInterface, ActiveSheetReaderInterface
 {
     public function format(): string
     {
@@ -37,6 +37,12 @@ final class XlsxReader implements AdvancedReaderInterface
     public function inspect(string $path, array $options = []): array
     {
         return (new XlsxInspector())->inspect($path, $options);
+    }
+
+    /** @param array<string,mixed> $options @return array{index:int,name:string} */
+    public function activeSheet(string $path, array $options = []): array
+    {
+        return (new XlsxInspector($this->resolver))->activeSheet($path, $options);
     }
 
     private XlsxWorkbookResolver $resolver;

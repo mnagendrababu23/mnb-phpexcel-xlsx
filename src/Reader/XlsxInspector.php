@@ -27,6 +27,7 @@ final class XlsxInspector
      *   size_bytes:int,
      *   encrypted:bool,
      *   sheets:list<array<string,mixed>>,
+     *   active_sheet:array{index:int,name:string}|null,
      *   warnings:list<string>,
      *   errors:list<string>
      * }
@@ -43,6 +44,7 @@ final class XlsxInspector
                     'size_bytes' => is_file($path) ? (int) filesize($path) : 0,
                     'encrypted' => true,
                     'sheets' => [],
+                    'active_sheet' => null,
                     'warnings' => [],
                     'errors' => ['A password is required to inspect this encrypted XLSX file.'],
                 ];
@@ -68,6 +70,7 @@ final class XlsxInspector
             'size_bytes' => is_file($path) ? (int) filesize($path) : 0,
             'encrypted' => false,
             'sheets' => [],
+            'active_sheet' => null,
             'warnings' => &$warnings,
             'errors' => &$errors,
         ];
@@ -135,6 +138,9 @@ final class XlsxInspector
 
         try {
             $sheets = $this->resolver->sheets($realPath);
+            if ($sheets !== []) {
+                $result['active_sheet'] = $this->resolver->activeSheet($realPath);
+            }
             foreach ($sheets as $sheet) {
                 $result['sheets'][] = array_merge($sheet, $this->inspectSheetXml($realPath, $sheet['path'], $sheet['exists']));
                 if (!$sheet['exists']) {
@@ -162,6 +168,31 @@ final class XlsxInspector
 
         $result['status'] = $errors === [] ? ($warnings === [] ? 'ok' : 'warning') : 'failed';
         return $result;
+    }
+
+    /** @param array<string,mixed> $options @return array{index:int,name:string} */
+    public function activeSheet(string $path, array $options = []): array
+    {
+        $encryption = new XlsxEncryption();
+        if ($encryption->isEncryptedFile($path)) {
+            $password = (string) ($options['password'] ?? '');
+            if ($password === '') {
+                throw new MnbExcelException('A password is required to inspect the active worksheet of this encrypted XLSX file.');
+            }
+            $temporary = $encryption->decryptToTemporary($path, $password, $options);
+            try {
+                return $this->activeSheet($temporary, []);
+            } finally {
+                @unlink($temporary);
+            }
+        }
+
+        $realPath = realpath($path);
+        if ($realPath === false || !is_file($realPath)) {
+            throw new MnbExcelException('Invalid XLSX path: ' . $path);
+        }
+
+        return $this->resolver->activeSheet($realPath);
     }
 
     /** @return list<string> */
