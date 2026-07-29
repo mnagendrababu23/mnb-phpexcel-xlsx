@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mnb\PHPExcel\Reader;
 
 use Mnb\PHPExcel\Support\MnbExcelException;
+use Mnb\PHPExcel\Support\SheetSelectionException;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
 final class XlsxWorkbookResolver
@@ -36,6 +37,16 @@ final class XlsxWorkbookResolver
 
     public function resolveSheetPath(string $realPath, int|string $sheet): string
     {
+        if (is_string($sheet)) {
+            $sheet = trim($sheet);
+            if ($sheet === '') {
+                throw SheetSelectionException::emptyName($realPath);
+            }
+        }
+        if ((is_int($sheet) || ctype_digit((string) $sheet)) && (int) $sheet < 1) {
+            throw SheetSelectionException::invalidIndex((int) $sheet, $realPath);
+        }
+
         $sheets = $this->sheets($realPath);
         if ($sheets === []) {
             throw new MnbExcelException('Workbook does not contain any sheets.');
@@ -44,16 +55,13 @@ final class XlsxWorkbookResolver
         $selected = null;
         if (is_int($sheet) || ctype_digit((string) $sheet)) {
             $index = (int) $sheet;
-            if ($index < 1) {
-                throw new MnbExcelException('Sheet number must be greater than zero.');
-            }
             $selected = $sheets[$index - 1] ?? null;
         } else {
-            $selected = $this->findSheetByName($sheets, (string) $sheet);
+            $selected = $this->findSheetByName($sheets, (string) $sheet, $realPath);
         }
 
         if ($selected === null) {
-            throw new MnbExcelException('Worksheet not found: ' . (string) $sheet);
+            throw SheetSelectionException::notFound($sheet, $realPath, array_column($sheets, 'name'));
         }
 
         if (!$selected['exists']) {
@@ -103,7 +111,7 @@ final class XlsxWorkbookResolver
     }
 
     /** @param list<array{index:int,name:string,sheet_id:int,relationship_id:string,state:string,path:string,exists:bool}> $sheets */
-    private function findSheetByName(array $sheets, string $name): ?array
+    private function findSheetByName(array $sheets, string $name, string $realPath): ?array
     {
         foreach ($sheets as $sheet) {
             if ($sheet['name'] === $name) {
@@ -120,7 +128,7 @@ final class XlsxWorkbookResolver
         }
 
         if (count($matches) > 1) {
-            throw new MnbExcelException('Multiple worksheets match the name: ' . $name);
+            throw SheetSelectionException::ambiguousName($name, $realPath, array_column($sheets, 'name'));
         }
 
         return $matches[0] ?? null;
