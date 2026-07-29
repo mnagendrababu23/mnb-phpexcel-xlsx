@@ -6,12 +6,8 @@ namespace Mnb\PHPExcel\Reader\Formula;
 
 final class FormulaEvaluatorFactory
 {
-    public static function create(bool $preferNative = false): FormulaEvaluatorInterface
+    public static function create(bool $preferNative = true): FormulaEvaluatorInterface
     {
-        $phpSpreadsheet = new PhpSpreadsheetFormulaEvaluator();
-        if (!$preferNative && $phpSpreadsheet->available()) {
-            return $phpSpreadsheet;
-        }
-        return new NativeFormulaEvaluator($phpSpreadsheet->available() ? $phpSpreadsheet : null);
+        return new NativeFormulaEvaluator();
     }
 }

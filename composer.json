@@ -6,15 +6,16 @@
     "require": {
         "php": ">=8.1",
         "ext-iconv": "*",
+        "ext-libxml": "*",
         "ext-openssl": "*",
-        "mnb/mnb-phpexcel-core": "^1.7"
+        "ext-zlib": "*",
+        "mnb/mnb-phpexcel-core": "^2.0"
     },
     "minimum-stability": "stable",
     "prefer-stable": true,
     "suggest": {
         "ext-zip": "Recommended for native high-performance XLSX package access; a pure-PHP fallback is included.",
-        "ext-xmlreader": "Recommended for true streaming XLSX reads; a pure-PHP fallback is included.",
-        "phpoffice/phpspreadsheet": "Adds compatibility for specialist formulas outside the expanded native formula engine."
+        "ext-xmlreader": "Recommended for true streaming XLSX reads; a pure-PHP fallback is included."
     },
     "autoload": {
         "psr-4": {

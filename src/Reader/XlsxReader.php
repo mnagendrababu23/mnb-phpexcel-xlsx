@@ -20,8 +20,25 @@ use Mnb\PHPExcel\Support\Xml\XmlReader;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
 use Mnb\PHPExcel\Security\XlsxEncryption;
 
-final class XlsxReader implements IterableReaderInterface
+final class XlsxReader implements AdvancedReaderInterface
 {
+    public function format(): string
+    {
+        return 'xlsx';
+    }
+
+    /** @param array<string,mixed> $options @return list<string> */
+    public function sheetNames(string $path, array $options = []): array
+    {
+        return (new XlsxInspector())->sheetNames($path, $options);
+    }
+
+    /** @param array<string,mixed> $options @return array<string,mixed> */
+    public function inspect(string $path, array $options = []): array
+    {
+        return (new XlsxInspector())->inspect($path, $options);
+    }
+
     private XlsxWorkbookResolver $resolver;
 
     public function __construct(?XlsxWorkbookResolver $resolver = null)

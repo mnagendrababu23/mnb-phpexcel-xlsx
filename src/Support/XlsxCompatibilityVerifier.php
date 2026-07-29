@@ -6,7 +6,6 @@ namespace Mnb\PHPExcel\Support;
 
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
 
-use Mnb\PHPExcel\MnbExcel;
 
 final class XlsxCompatibilityVerifier
 {
@@ -113,50 +112,20 @@ final class XlsxCompatibilityVerifier
      */
     private function generatedFixtureBuilders(string $tmpRoot): array
     {
-        return [
-            'basic_excel_style_workbook' => static function (string $path): void {
-                MnbExcel::fromArray([
-                    ['Name' => 'Asha', 'Score' => 95, 'Passed' => true],
-                    ['Name' => 'Ravi', 'Score' => 88, 'Passed' => true],
-                ])->withHeader()->freezeHeader()->autoFilter()->autoWidth()->save($path);
-            },
-            'formulas_styles_merged_cells' => static function (string $path): void {
-                MnbExcel::fromArray([
-                    ['Metric' => 'Revenue', 'Value' => 12500],
-                    ['Metric' => 'Cost', 'Value' => 7200],
-                    ['Metric' => 'Profit', 'Value' => MnbExcel::formula('B2-B3', 5300)],
-                ])->withHeader()
-                    ->title('Compatibility Verification')
-                    ->mergeCells('A1:B1')
-                    ->styleHeader(['font' => ['bold' => true, 'color' => '#FFFFFF'], 'fill' => '#1F4E78'])
-                    ->currencyColumns(['Value'], '$')
-                    ->cellStyle('B4', ['font' => ['bold' => true]])
-                    ->autoWidth()
-                    ->save($path);
-            },
-            'comments_hyperlinks_notes' => static function (string $path): void {
-                MnbExcel::fromArray([
-                    ['Resource' => 'Repository', 'URL' => 'GitHub', 'Status' => 'Review'],
-                    ['Resource' => 'Documentation', 'URL' => 'Docs', 'Status' => 'Ready'],
-                ])->withHeader()
-                    ->hyperlink('B2', 'https://github.com/mnagendrababu23/mnb-phpexcel', 'Open repository', ['tooltip' => 'Project repository'])
-                    ->comment('C2', 'MNB PHPExcel', 'Verify this generated note opens without repair warning.')
-                    ->save($path);
-            },
-            'preserved_advanced_objects_template_flow' => static function (string $path) use ($tmpRoot): void {
-                $template = $tmpRoot . DIRECTORY_SEPARATOR . 'advanced-template.xlsx';
-                MnbExcel::fromArray([
-                    ['Task' => 'Template', 'Link' => 'Original'],
-                ])->withHeader()
-                    ->hyperlink('B2', 'https://example.com/template', 'Template link')
-                    ->comment('A2', 'Template', 'Template note to preserve.')
-                    ->save($template);
+        $factory = new XlsxCompatibilityFixtureFactory();
 
-                MnbExcel::fromArray([
-                    ['Task' => 'Generated', 'Link' => 'Copied package parts'],
-                ])->withHeader()
-                    ->preserveAdvancedObjectsFrom($template)
-                    ->save($path);
+        return [
+            'basic_excel_style_workbook' => static function (string $path) use ($factory): void {
+                $factory->basic($path);
+            },
+            'formulas_styles_merged_cells' => static function (string $path) use ($factory): void {
+                $factory->formulasStylesMergedCells($path);
+            },
+            'comments_hyperlinks_notes' => static function (string $path) use ($factory): void {
+                $factory->commentsHyperlinks($path);
+            },
+            'preserved_advanced_objects_template_flow' => static function (string $path) use ($factory, $tmpRoot): void {
+                $factory->preservedAdvancedObjects($path, $tmpRoot . DIRECTORY_SEPARATOR . 'advanced-template.xlsx');
             },
         ];
     }

@@ -20,7 +20,7 @@ final class AdvancedWorkbookCapabilities
                 ],
                 'many_spreadsheet_formats' => [
                     'status' => 'supported_modularly',
-                    'current' => ['native XLSX', 'CSV/TSV', 'JSON/NDJSON', 'XML', 'native ODS reading', 'legacy XLS reading and writing through the dedicated XLS module'],
+                    'current' => ['native XLSX', 'CSV/TSV', 'JSON/NDJSON', 'XML', 'native ODS reading', 'native BIFF8 XLS reading and writing through the dedicated XLS module'],
                     'limits' => ['ODS writing is not part of the current package family'],
                 ],
                 'advanced_style_manipulation' => [
@@ -30,8 +30,8 @@ final class AdvancedWorkbookCapabilities
                 ],
                 'formula_calculation_engine' => [
                     'status' => 'supported',
-                    'current' => ['formula expression reads', 'cached-result reads', 'formula writing', 'recalculate-on-open flags', 'expanded built-in formula evaluator', 'custom function registry', 'automatic PhpSpreadsheet compatibility fallback in XLS/full installs'],
-                    'limits' => ['vendor-specific functions use a registered custom function or the compatibility engine'],
+                    'current' => ['formula expression reads', 'cached-result reads', 'formula writing', 'recalculate-on-open flags', 'expanded built-in formula evaluator', 'custom function registry'],
+                    'limits' => ['vendor-specific functions require a registered custom function or a cached workbook result'],
                 ],
                 'charts' => [
                     'status' => 'supported',
@@ -50,7 +50,6 @@ final class AdvancedWorkbookCapabilities
                 ],
             ],
             'adapter_recommendations' => [
-                'php_spreadsheet_adapter' => 'Installed by the XLS/full package for formula-function compatibility and legacy XLS support.',
                 'framework_adapters' => ['Laravel', 'CodeIgniter', 'Slim/Symfony integrations should remain separate packages'],
             ],
         ];

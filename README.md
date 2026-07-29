@@ -1,35 +1,39 @@
-# mnb/mnb-phpexcel-xlsx
+# MNB PHPExcel XLSX
 
+<<<<<<< HEAD
 Native XLSX reader/writer with password encryption, document protection, formulas, pivots, and low-memory streaming for MNB PHPExcel.
 Documentation URL: https://mnbphpexcel.space/getting-started/installation
 This package is generated from the MNB PHPExcel monorepo. Do not copy source files between modules manually.
 
 ## Install
+=======
+Independent native XLSX reader/writer with streaming, formulas, styles, charts, pivots, comments, hyperlinks, protection, and Office password encryption.
+>>>>>>> 6bc1ca7 (Release v2.0.0)
 
 ```bash
-composer require mnb/mnb-phpexcel-xlsx
+composer require mnb/mnb-phpexcel-xlsx:^2.0
 ```
 
-See the main project documentation for typed options, streaming reads, and compatibility notes.
-
-## Lightweight file and sheet information
-
-Inspect package metadata, worksheet dimensions, and row counts without loading
-worksheet records into PHP arrays:
+For an XLSX-only installation, use `Mnb\PHPExcel\Format\Xlsx`—the `MnbExcel` facade belongs to the application package.
 
 ```php
 use Mnb\PHPExcel\Format\Xlsx;
 
-$file = Xlsx::fileInfo('orders.xlsx');
-$sheets = Xlsx::sheetsInfo('orders.xlsx');
-$orders = Xlsx::sheetInfo('orders.xlsx', 'Orders');
-$rows = Xlsx::rowCount('orders.xlsx', 'Orders');
-$allRows = Xlsx::rowCounts('orders.xlsx');
+$rows = Xlsx::read('report.xlsx')
+    ->sheet('Data')
+    ->withHeaderRow()
+    ->toArray();
+
+Xlsx::write($rows, 'report-copy.xlsx', ['with_header' => true]);
 ```
 
-`rowCount()` supports `filled`, `physical`, `last_row`, and `declared` modes.
-The `declared` mode reads the worksheet dimension and is fastest. Other modes
-scan worksheet XML without decoding cell values or creating workbook row arrays.
+Import templates are also package-local and do not require the application package:
 
-See the scripts in [`examples/`](examples/).
+```php
+Xlsx::writeImportTemplate([
+    'name' => ['header' => 'Name', 'required' => true],
+    'status' => ['header' => 'Status', 'list' => ['Active', 'Inactive']],
+], 'import-template.xlsx');
+```
 
+This package does not require, suggest, or call PhpSpreadsheet. It requires `ext-iconv`, `ext-openssl`, `ext-libxml`, and `ext-zlib`. `ext-zip` and `ext-xmlreader` remain optional performance extensions; package-local fallbacks are included.
