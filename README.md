@@ -7,6 +7,11 @@ composer require mnb/mnb-phpexcel-xlsx:^2.0
 ```
 Documentation URL: https://mnbphpexcel.space/modules/xlsx/quick-start
 
+MNB PHPExcel Assistant
+Generate MNB PHPExcel code using our dedicated ChatGPT assistant:
+
+Open MNB PHPExcel AI Assistant
+
 For an XLSX-only installation, use `Mnb\PHPExcel\Format\Xlsx`—the `MnbExcel` facade belongs to the application package.
 
 ```php
