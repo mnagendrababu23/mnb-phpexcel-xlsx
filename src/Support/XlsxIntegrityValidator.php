@@ -78,6 +78,7 @@ final class XlsxIntegrityValidator
             $this->checkWorkbookRelationshipIds($zip, $relationships);
             $this->checkWorksheetRelationshipIds($zip, $relationships);
             $this->checkContentTypeCoverage($contentTypes);
+            $this->checkDocumentPropertyRegistration($contentTypes, $relationships['_rels/.rels'] ?? []);
         } finally {
             $zip->close();
         }
@@ -161,7 +162,7 @@ final class XlsxIntegrityValidator
         }
 
         $defaults = [];
-        preg_match_all('/<Default\b[^>]*\/?>/iu', $xml, $defaultMatches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?Default\b[^>]*\/?>/iu', $xml, $defaultMatches);
         foreach ($defaultMatches[0] ?? [] as $tag) {
             $attrs = $this->parseXmlAttributes($tag);
             if (isset($attrs['Extension'], $attrs['ContentType'])) {
@@ -170,7 +171,7 @@ final class XlsxIntegrityValidator
         }
 
         $overrides = [];
-        preg_match_all('/<Override\b[^>]*\/?>/iu', $xml, $overrideMatches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?Override\b[^>]*\/?>/iu', $xml, $overrideMatches);
         foreach ($overrideMatches[0] ?? [] as $tag) {
             $attrs = $this->parseXmlAttributes($tag);
             if (isset($attrs['PartName'], $attrs['ContentType'])) {
@@ -379,11 +380,77 @@ final class XlsxIntegrityValidator
         $this->pass('content_type_coverage', 'Checked content type coverage for package entries.');
     }
 
+    /**
+     * Document-property parts are optional, but when present OOXML requires both
+     * a content-type override and a package-root relationship.
+     *
+     * @param array{defaults:array<string,string>,overrides:array<string,string>} $contentTypes
+     * @param array<string,array{target:string,mode:string,type:string}> $rootRelationships
+     */
+    private function checkDocumentPropertyRegistration(array $contentTypes, array $rootRelationships): void
+    {
+        $requirements = [
+            'docProps/core.xml' => [
+                'content_type' => 'application/vnd.openxmlformats-package.core-properties+xml',
+                'relationship_suffix' => '/metadata/core-properties',
+            ],
+            'docProps/app.xml' => [
+                'content_type' => 'application/vnd.openxmlformats-officedocument.extended-properties+xml',
+                'relationship_suffix' => '/extended-properties',
+            ],
+            'docProps/custom.xml' => [
+                'content_type' => 'application/vnd.openxmlformats-officedocument.custom-properties+xml',
+                'relationship_suffix' => '/custom-properties',
+            ],
+        ];
+
+        $checked = 0;
+        foreach ($requirements as $entry => $requirement) {
+            if (!$this->hasEntry($entry)) {
+                continue;
+            }
+
+            $checked++;
+            $partName = '/' . $entry;
+            $actualContentType = (string) (($contentTypes['overrides'] ?? [])[$partName] ?? '');
+            if ($actualContentType !== $requirement['content_type']) {
+                $this->fail(
+                    'document_property_content_type',
+                    'Document property part ' . $partName . ' is missing its required content type override.'
+                );
+            }
+
+            $registered = false;
+            foreach ($rootRelationships as $relationship) {
+                if (strtolower((string) ($relationship['mode'] ?? '')) === 'external') {
+                    continue;
+                }
+                $resolved = $this->resolveRelationshipTarget('_rels/.rels', (string) ($relationship['target'] ?? ''));
+                $type = (string) ($relationship['type'] ?? '');
+                if ($resolved === $entry && str_ends_with($type, $requirement['relationship_suffix'])) {
+                    $registered = true;
+                    break;
+                }
+            }
+
+            if (!$registered) {
+                $this->fail(
+                    'document_property_relationship',
+                    'Document property part ' . $partName . ' is missing its required package-root relationship.'
+                );
+            }
+        }
+
+        if ($checked > 0) {
+            $this->pass('document_property_registration', 'Checked OOXML registration for ' . $checked . ' document property part(s).');
+        }
+    }
+
     /** @return array<string,array{target:string,mode:string,type:string}> */
     private function parseRelationships(string $xml): array
     {
         $relationships = [];
-        preg_match_all('/<Relationship\b[^>]*\/?>/iu', $xml, $matches);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?Relationship\b[^>]*\/?>/iu', $xml, $matches);
         foreach ($matches[0] ?? [] as $tag) {
             $attrs = $this->parseXmlAttributes($tag);
             if (!isset($attrs['Id'])) {
@@ -402,7 +469,7 @@ final class XlsxIntegrityValidator
     private function relationshipIdsUsedByXml(string $xml): array
     {
         $ids = [];
-        preg_match_all('/\br:id\s*=\s*("([^"]+)"|\'([^\']+)\')/iu', $xml, $matches, PREG_SET_ORDER);
+        preg_match_all('/\b[A-Za-z_][A-Za-z0-9_.-]*:id\s*=\s*("([^"]+)"|\'([^\']+)\')/iu', $xml, $matches, PREG_SET_ORDER);
         foreach ($matches as $match) {
             $id = (string) (($match[2] ?? '') !== '' ? $match[2] : ($match[3] ?? ''));
             if ($id !== '') {

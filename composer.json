@@ -9,7 +9,7 @@
         "ext-libxml": "*",
         "ext-openssl": "*",
         "ext-zlib": "*",
-        "mnb/mnb-phpexcel-core": "^2.0.3"
+        "mnb/mnb-phpexcel-core": "^2.0.5"
     },
     "minimum-stability": "stable",
     "prefer-stable": true,

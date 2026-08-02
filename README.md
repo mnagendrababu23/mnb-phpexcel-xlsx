@@ -5,13 +5,6 @@ Independent native XLSX reader/writer with streaming, formulas, styles, charts, 
 ```bash
 composer require mnb/mnb-phpexcel-xlsx:^2.0
 ```
-Documentation URL: https://mnbphpexcel.space/modules/xlsx/quick-start
-
-## MNB PHPExcel Assistant
-
-Generate MNB PHPExcel code using our dedicated ChatGPT assistant:
-
-[Open MNB PHPExcel AI Assistant](https://chatgpt.com/g/g-6a6e31d80350819194b68853d41c1561-mnb-phpexcel-assistant)
 
 For an XLSX-only installation, use `Mnb\PHPExcel\Format\Xlsx`—the `MnbExcel` facade belongs to the application package.
 
@@ -92,3 +85,29 @@ foreach ($data->rows() as $row) {
 ```
 
 `inspect()` now includes an `active_sheet` entry with a 1-based index and worksheet name. XLSX active-sheet detection reads the workbook's `activeTab`; workbooks without that metadata safely fall back to the first worksheet.
+
+## Unified XLSX metadata
+
+```php
+$quick = Xlsx::metaInfo('report.xlsx', ['profile' => 'quick']);
+$full = Xlsx::read('report.xlsx')->metaInfo(['profile' => 'full']);
+```
+
+Metadata schema `1.0` covers file/package information, document and revision properties, application/custom properties, sheets and hidden content, protection/encryption/signatures, macros, names/tables/charts/pivots, links/connections, comments, embedded objects, formulas/calculation, print settings, validations and XML package details. Every section reports an explicit `state`, `count`, `items`, `truncated`, and `warnings` envelope.
+
+Profiles are `quick`, `standard`, `full`, and `forensic`. Quick mode avoids full worksheet scans. Full mode returns item inventories, and forensic mode can add hashes and package-part details. The reader never executes formulas, VBA, ActiveX, external links, data connections, Power Query or embedded files.
+
+Update metadata atomically:
+
+```php
+Xlsx::updateMetaInfo('source.xlsx', 'updated.xlsx', [
+    'document' => ['title' => 'Annual Report', 'creator' => 'MNB'],
+    'custom_properties' => ['Project ID' => 'PRJ-1001'],
+    'workbook' => ['active_sheet' => 'Summary'],
+    'calculation' => ['mode' => 'auto'],
+]);
+
+Xlsx::removePersonalInfo('updated.xlsx', 'clean.xlsx');
+```
+
+Updates preserve unknown OOXML parts, arbitrary namespace prefixes and encryption mode. Encrypted input requires the existing password. The writable sections are document, revision, application, custom properties, workbook settings and calculation settings; feature objects remain owned by their dedicated APIs.
