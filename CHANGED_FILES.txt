@@ -1,0 +1,17 @@
+# Changed/new files for mnb-phpexcel-xlsx
+# Apply at the repository root, preserving paths.
+
+MODIFIED CHANGELOG.md
+MODIFIED README.md
+MODIFIED VERSION
+MODIFIED composer.json
+NEW      examples/unified_metadata.php
+MODIFIED src/Format/Xlsx.php
+NEW      src/Reader/XlsxMetadataReader.php
+MODIFIED src/Reader/XlsxReader.php
+MODIFIED src/Support/XlsxIntegrityValidator.php
+NEW      src/Writer/XlsxMetadataWriter.php
+NEW      tests/metadata_contract_smoke.php
+NEW      tests/metadata_edge_cases_smoke.php
+NEW      tests/metadata_namespace_smoke.php
+NEW      tests/metadata_writer_smoke.php
