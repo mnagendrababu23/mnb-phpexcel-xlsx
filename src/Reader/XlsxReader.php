@@ -19,8 +19,9 @@ use Mnb\PHPExcel\Support\XlsxIntegrityValidator;
 use Mnb\PHPExcel\Support\Xml\XmlReader;
 use Mnb\PHPExcel\Support\Zip\ZipArchive;
 use Mnb\PHPExcel\Security\XlsxEncryption;
+use Mnb\PHPExcel\Snapshot\VisualSnapshotReaderInterface;
 
-final class XlsxReader implements AdvancedReaderInterface, ActiveSheetReaderInterface, MetadataReaderInterface
+final class XlsxReader implements AdvancedReaderInterface, ActiveSheetReaderInterface, MetadataReaderInterface, VisualSnapshotReaderInterface
 {
     public function format(): string
     {
@@ -43,6 +44,12 @@ final class XlsxReader implements AdvancedReaderInterface, ActiveSheetReaderInte
     public function metaInfo(string $path, array $options = []): array
     {
         return (new XlsxMetadataReader($this->resolver))->metaInfo($path, $options);
+    }
+
+    /** @param array<string,mixed> $options @return array<string,mixed> */
+    public function visualSnapshot(string $path, array $options = []): array
+    {
+        return (new XlsxVisualSnapshotReader($this->resolver, $this))->visualSnapshot($path, $options);
     }
 
     /** @param array<string,mixed> $options @return array{index:int,name:string} */

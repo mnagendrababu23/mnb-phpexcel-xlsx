@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Writer;
 
+use DateTimeImmutable;
+use DateTimeInterface;
+use DateTimeZone;
 use Mnb\PHPExcel\Core\CellValue;
+use Mnb\PHPExcel\Core\StyleNormalizer;
 use Mnb\PHPExcel\Core\WorkbookData;
 use Mnb\PHPExcel\Core\WorksheetData;
 use Mnb\PHPExcel\Reader\XlsxWorkbookResolver;
@@ -249,9 +253,15 @@ final class XlsxWriter
             }
             foreach ($sheet->rows as $rowIndex => $row) {
                 $r = $rowIndex + 1;
-                foreach (array_values($row) as $columnIndex => $_value) {
+                foreach (array_values($row) as $columnIndex => $value) {
                     $c = $columnIndex + 1;
-                    $style = $this->effectiveCellStyle($sheet, $r, $c, Coordinate::columnIndexToName($c) . $r);
+                    $style = $this->effectiveCellStyle(
+                        $sheet,
+                        $r,
+                        $c,
+                        Coordinate::columnIndexToName($c) . $r,
+                        $value
+                    );
                     $this->styleIdFor($style);
                 }
             }
@@ -259,7 +269,13 @@ final class XlsxWriter
     }
 
     /** @return array<string,mixed> */
-    private function effectiveCellStyle(WorksheetData $sheet, int $row, int $column, string $cellRef): array
+    private function effectiveCellStyle(
+        WorksheetData $sheet,
+        int $row,
+        int $column,
+        string $cellRef,
+        mixed $value = null
+    ): array
     {
         $style = [];
 
@@ -279,6 +295,16 @@ final class XlsxWriter
             }
             if (isset($sheet->cellStyles[$cellRef])) {
                 $style = $this->mergeStyles($style, $this->resolveStyle($sheet, $sheet->cellStyles[$cellRef]));
+            }
+        }
+
+        if (!array_key_exists('format', $style)) {
+            if ($value instanceof CellValue && $value->type() === CellValue::TYPE_DATE) {
+                $style['format'] = (string) ($value->options()['format'] ?? 'm/d/yy');
+            } elseif ($value instanceof DateTimeInterface) {
+                $style['format'] = $value->format('His.u') === '000000.000000'
+                    ? 'm/d/yy'
+                    : 'm/d/yy h:mm';
             }
         }
 
@@ -325,25 +351,7 @@ final class XlsxWriter
     /** @param array<string,mixed> $style */
     private function normalizeStyle(array $style): array
     {
-        $normalized = [];
-
-        foreach ($style as $key => $value) {
-            $styleKey = strtolower((string) $key);
-            if ($styleKey === 'number_format') {
-                $styleKey = 'format';
-            }
-            if ($styleKey === 'wraptext') {
-                $styleKey = 'wrap_text';
-            }
-            if (is_array($value)) {
-                $normalized[$styleKey] = $this->normalizeStyle($value);
-            } else {
-                $normalized[$styleKey] = $value;
-            }
-        }
-
-        ksort($normalized);
-        return $normalized;
+        return StyleNormalizer::normalize($style);
     }
 
     /** @param array<string,mixed> $base @param array<string,mixed> $override */
@@ -1072,15 +1080,38 @@ final class XlsxWriter
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+        if ((bool) ($workbook->metadata['date1904'] ?? false)) {
+            $xml .= '<workbookPr date1904="1"/>';
+        }
+        $activeSheet = $workbook->metadata['_mnb_active_sheet'] ?? 1;
+        if (is_string($activeSheet) && !ctype_digit($activeSheet)) {
+            foreach ($workbook->sheets as $index => $candidate) {
+                if ($candidate->name === $activeSheet) {
+                    $activeSheet = $index + 1;
+                    break;
+                }
+            }
+        }
+        $activeTab = max(0, min(count($workbook->sheets) - 1, ((int) $activeSheet) - 1));
+        $xml .= '<bookViews><workbookView activeTab="' . $activeTab . '"/></bookViews>';
         $workbookProtection = $workbook->metadata['_mnb_workbook_protection'] ?? null;
         if (is_array($workbookProtection) && (string) ($workbookProtection['password'] ?? '') !== '') {
             $xml .= '<workbookProtection' . $this->xmlAttributes(DocumentProtection::workbookAttributes((string) $workbookProtection['password'], $workbookProtection)) . '/>';
         }
         $xml .= '<sheets>';
 
+        $sheetStates = is_array($workbook->metadata['_mnb_sheet_states'] ?? null)
+            ? $workbook->metadata['_mnb_sheet_states']
+            : [];
         foreach ($workbook->sheets as $index => $sheet) {
             $id = $index + 1;
-            $xml .= '<sheet name="' . $this->esc($sheet->name) . '" sheetId="' . $id . '" r:id="rId' . $id . '"/>';
+            $state = (string) ($sheetStates[$sheet->name] ?? $sheetStates[$id] ?? 'visible');
+            if (!in_array($state, ['visible', 'hidden', 'veryHidden'], true)) {
+                $state = 'visible';
+            }
+            $xml .= '<sheet name="' . $this->esc($sheet->name) . '" sheetId="' . $id . '" r:id="rId' . $id . '"'
+                . ($state !== 'visible' ? ' state="' . $state . '"' : '')
+                . '/>';
         }
         $xml .= '</sheets>';
         $generatedPivotCaches = '';
@@ -1150,7 +1181,9 @@ final class XlsxWriter
             foreach (array_values($row) as $columnIndex => $value) {
                 $c = $columnIndex + 1;
                 $cellRef = Coordinate::columnIndexToName($c) . $r;
-                $styleId = $this->styleIdFor($this->effectiveCellStyle($sheet, $r, $c, $cellRef));
+                $styleId = $this->styleIdFor(
+                    $this->effectiveCellStyle($sheet, $r, $c, $cellRef, $value)
+                );
                 $xml .= $this->cellXml($cellRef, $value, $styleId);
             }
             $xml .= '</row>';
@@ -1283,9 +1316,49 @@ final class XlsxWriter
             CellValue::TYPE_NUMBER => '<c r="' . $cellRef . '"' . $style . '><v>' . $this->number($cell->value()) . '</v></c>',
             CellValue::TYPE_ERROR => '<c r="' . $cellRef . '" t="e"' . $style . '><v>' . $this->esc((string) $cell->value()) . '</v></c>',
             CellValue::TYPE_FORMULA => $this->formulaCellXml($cellRef, $cell, $style),
-            CellValue::TYPE_DATE => $this->inlineStringCellXml($cellRef, (string) $cell->displayValue(), $style),
+            CellValue::TYPE_DATE => $this->dateCellXml($cellRef, $cell, $style),
             default => $this->inlineStringCellXml($cellRef, (string) $cell->displayValue(), $style),
         };
+    }
+
+    private function dateCellXml(string $cellRef, CellValue $cell, string $style): string
+    {
+        $value = $cell->value();
+        try {
+            $date = $value instanceof DateTimeInterface
+                ? DateTimeImmutable::createFromInterface($value)
+                : new DateTimeImmutable((string) $value);
+        } catch (\Throwable $e) {
+            throw new MnbExcelException('Invalid typed date cell value: ' . (string) $value, previous: $e);
+        }
+
+        $serial = $this->excelDateSerial($date, (bool) ($this->currentWorkbookMetadata['date1904'] ?? false));
+        return '<c r="' . $cellRef . '"' . $style . '><v>' . $this->number($serial) . '</v></c>';
+    }
+
+    private function excelDateSerial(DateTimeInterface $date, bool $date1904): float
+    {
+        // Excel serials are timezone-free wall-clock values. Rebuilding the
+        // components in UTC avoids daylight-saving offsets changing the serial.
+        $utc = new DateTimeZone('UTC');
+        $value = DateTimeImmutable::createFromFormat(
+            '!Y-m-d H:i:s.u',
+            $date->format('Y-m-d H:i:s.u'),
+            $utc
+        );
+        if (!$value instanceof DateTimeImmutable) {
+            throw new MnbExcelException('Unable to normalize typed date cell value.');
+        }
+        $base = new DateTimeImmutable(
+            $date1904 ? '1904-01-01 00:00:00.000000' : '1899-12-31 00:00:00.000000',
+            $utc
+        );
+        $seconds = (float) ($value->format('U.u')) - (float) ($base->format('U.u'));
+        $serial = $seconds / 86400;
+        if (!$date1904 && $serial >= 60) {
+            $serial += 1; // Excel's historic fake 1900-02-29 day.
+        }
+        return $serial;
     }
 
     private function formulaCellXml(string $cellRef, CellValue $cell, string $style): string
@@ -1343,10 +1416,18 @@ final class XlsxWriter
             $fills .= $this->fillXml($style);
             $borders .= $this->borderXml($style);
             [$numFmtId, $isCustom] = $this->numFmtForStyle($style, $customFormats);
-            $xfs .= '<xf numFmtId="' . $numFmtId . '" fontId="' . $id . '" fillId="' . ($id + 1) . '" borderId="' . $id . '" xfId="0" applyFont="1" applyFill="1" applyBorder="1"' . ($numFmtId > 0 ? ' applyNumberFormat="1"' : '') . '>';
             $alignment = $this->alignmentXml($style['alignment'] ?? null);
+            $protection = $this->protectionXml($style['protection'] ?? null);
+            $xfs .= '<xf numFmtId="' . $numFmtId . '" fontId="' . $id . '" fillId="' . ($id + 1) . '" borderId="' . $id . '" xfId="0" applyFont="1" applyFill="1" applyBorder="1"'
+                . ($numFmtId > 0 ? ' applyNumberFormat="1"' : '')
+                . ($alignment !== '' ? ' applyAlignment="1"' : '')
+                . ($protection !== '' ? ' applyProtection="1"' : '')
+                . '>';
             if ($alignment !== '') {
                 $xfs .= $alignment;
+            }
+            if ($protection !== '') {
+                $xfs .= $protection;
             }
             $xfs .= '</xf>';
             unset($isCustom);
@@ -1383,7 +1464,7 @@ final class XlsxWriter
         $nextId = 164;
         foreach (array_merge(array_values($this->styleEntries), array_values($this->differentialStyles)) as $style) {
             $format = $this->formatCode($style['format'] ?? null);
-            if ($format === null || $format === '@') {
+            if ($format === null || $this->builtinNumFmtId($format) !== null) {
                 continue;
             }
             if (!isset($formats[$format])) {
@@ -1400,8 +1481,9 @@ final class XlsxWriter
         if ($format === null) {
             return [0, false];
         }
-        if ($format === '@') {
-            return [49, false];
+        $builtin = $this->builtinNumFmtId($format);
+        if ($builtin !== null) {
+            return [$builtin, false];
         }
         return [$customFormats[$format] ?? 0, true];
     }
@@ -1414,6 +1496,7 @@ final class XlsxWriter
 
         $format = (string) $format;
         return match (strtolower($format)) {
+            'general' => null,
             'text' => '@',
             'integer', 'int' => '#,##0',
             'number', 'decimal' => '#,##0.00',
@@ -1425,85 +1508,190 @@ final class XlsxWriter
         };
     }
 
+    private function builtinNumFmtId(string $format): ?int
+    {
+        return match ($format) {
+            'General' => 0, '@' => 49, '0' => 1, '0.00' => 2, '#,##0' => 3, '#,##0.00' => 4,
+            '0%' => 9, '0.00%' => 10, '0.00E+00' => 11, '# ?/?' => 12, '# ??/??' => 13,
+            'm/d/yy' => 14, 'd-mmm-yy' => 15, 'd-mmm' => 16, 'mmm-yy' => 17,
+            'h:mm AM/PM' => 18, 'h:mm:ss AM/PM' => 19, 'h:mm' => 20, 'h:mm:ss' => 21,
+            'm/d/yy h:mm' => 22, 'mm:ss' => 45, '[h]:mm:ss' => 46, 'mmss.0' => 47,
+            default => null,
+        };
+    }
+
     private function fontXml(array $style): string
     {
         $font = is_array($style['font'] ?? null) ? $style['font'] : [];
         $fontSize = isset($font['size']) && is_numeric($font['size']) ? (float) $font['size'] : 11.0;
         $fontName = isset($font['name']) ? (string) $font['name'] : 'Calibri';
-        $fontColor = $this->styleColor($font['color'] ?? null, 'FF000000');
 
         $xml = '<font>';
-        if (($font['bold'] ?? false) === true) {
-            $xml .= '<b/>';
+        foreach (['bold' => 'b', 'italic' => 'i', 'strike' => 'strike', 'outline' => 'outline', 'shadow' => 'shadow', 'condense' => 'condense', 'extend' => 'extend'] as $key => $tag) {
+            if (($font[$key] ?? false) === true) {
+                $xml .= '<' . $tag . '/>';
+            }
         }
-        if (($font['italic'] ?? false) === true) {
-            $xml .= '<i/>';
+        if (array_key_exists('underline', $font) && $font['underline'] !== false && $font['underline'] !== 'none') {
+            $underline = $font['underline'] === true ? 'single' : (string) $font['underline'];
+            $xml .= $underline === 'single' ? '<u/>' : '<u val="' . $this->esc($underline) . '"/>';
         }
-        if (($font['underline'] ?? false) === true) {
-            $xml .= '<u/>';
+        if (isset($font['vertical_align']) && $font['vertical_align'] !== '') {
+            $xml .= '<vertAlign val="' . $this->esc((string) $font['vertical_align']) . '"/>';
         }
-        $xml .= '<sz val="' . $this->number($fontSize) . '"/><color rgb="' . $fontColor . '"/><name val="' . $this->esc($fontName) . '"/></font>';
-
-        return $xml;
+        $xml .= '<sz val="' . $this->number($fontSize) . '"/>';
+        if (isset($font['color'])) {
+            $xml .= $this->colorElement('color', $font['color'], 'FF000000');
+        }
+        $xml .= '<name val="' . $this->esc($fontName) . '"/>';
+        foreach (['family', 'charset', 'scheme'] as $key) {
+            if (isset($font[$key]) && $font[$key] !== '') {
+                $xml .= '<' . $key . ' val="' . $this->esc((string) $font[$key]) . '"/>';
+            }
+        }
+        return $xml . '</font>';
     }
 
     private function fillXml(array $style): string
     {
-        if (!isset($style['fill']) || $style['fill'] === false || $style['fill'] === '') {
+        $fill = $style['fill'] ?? false;
+        if ($fill === false || $fill === null || $fill === '') {
             return '<fill><patternFill patternType="none"/></fill>';
         }
+        if (!is_array($fill)) {
+            $fill = ['type' => 'pattern', 'pattern' => 'solid', 'foreground' => $fill];
+        }
 
-        $fill = $this->styleColor($style['fill'], 'FFFFFFFF');
-        return '<fill><patternFill patternType="solid"><fgColor rgb="' . $fill . '"/><bgColor indexed="64"/></patternFill></fill>';
+        if (($fill['type'] ?? 'pattern') === 'gradient') {
+            $attributes = '';
+            $gradientType = (string) ($fill['gradient_type'] ?? 'linear');
+            if ($gradientType !== 'linear') {
+                $attributes .= ' type="' . $this->esc($gradientType) . '"';
+            }
+            foreach (['degree', 'left', 'right', 'top', 'bottom'] as $key) {
+                if (isset($fill[$key]) && is_numeric($fill[$key])) {
+                    $attributes .= ' ' . $key . '="' . $this->number((float) $fill[$key]) . '"';
+                }
+            }
+            $xml = '<fill><gradientFill' . $attributes . '>';
+            foreach ((array) ($fill['stops'] ?? []) as $stop) {
+                if (!is_array($stop) || !isset($stop['color'])) {
+                    continue;
+                }
+                $xml .= '<stop position="' . $this->number((float) ($stop['position'] ?? 0)) . '">' . $this->colorElement('color', $stop['color'], 'FFFFFFFF') . '</stop>';
+            }
+            return $xml . '</gradientFill></fill>';
+        }
+
+        $pattern = (string) ($fill['pattern'] ?? 'solid');
+        $xml = '<fill><patternFill patternType="' . $this->esc($pattern) . '">';
+        if (isset($fill['foreground'])) {
+            $xml .= $this->colorElement('fgColor', $fill['foreground'], 'FFFFFFFF');
+        }
+        if (isset($fill['background'])) {
+            $xml .= $this->colorElement('bgColor', $fill['background'], 'FFFFFFFF');
+        } elseif ($pattern === 'solid') {
+            $xml .= '<bgColor indexed="64"/>';
+        }
+        return $xml . '</patternFill></fill>';
     }
 
     private function borderXml(array $style): string
     {
-        if (!isset($style['border']) || $style['border'] === false) {
+        $border = $style['border'] ?? false;
+        if ($border === false || !is_array($border)) {
             return '<border><left/><right/><top/><bottom/><diagonal/></border>';
         }
 
-        $border = $style['border'];
-        $borderColor = 'FFD0D7DE';
-        if (is_array($border) && isset($border['color'])) {
-            $borderColor = $this->styleColor($border['color'], 'FFD0D7DE');
+        $attributes = '';
+        foreach (['diagonal_up' => 'diagonalUp', 'diagonal_down' => 'diagonalDown', 'outline' => 'outline'] as $key => $attribute) {
+            if (array_key_exists($key, $border)) {
+                $attributes .= ' ' . $attribute . '="' . ((bool) $border[$key] ? '1' : '0') . '"';
+            }
         }
-        $borderStyle = is_array($border) && isset($border['style']) ? (string) $border['style'] : 'thin';
-        if (!in_array($borderStyle, ['thin', 'medium', 'dashed', 'dotted', 'thick', 'double'], true)) {
-            $borderStyle = 'thin';
+        $xml = '<border' . $attributes . '>';
+        foreach (['left', 'right', 'top', 'bottom', 'diagonal', 'vertical', 'horizontal', 'start', 'end'] as $side) {
+            $definition = $border[$side] ?? null;
+            if (!is_array($definition) || $definition === []) {
+                $xml .= '<' . $side . '/>';
+                continue;
+            }
+            $styleName = (string) ($definition['style'] ?? 'thin');
+            $xml .= '<' . $side . ($styleName !== '' && $styleName !== 'none' ? ' style="' . $this->esc($styleName) . '"' : '') . '>';
+            if (isset($definition['color'])) {
+                $xml .= $this->colorElement('color', $definition['color'], 'FFD0D7DE');
+            }
+            $xml .= '</' . $side . '>';
         }
-
-        return '<border><left style="' . $borderStyle . '"><color rgb="' . $borderColor . '"/></left><right style="' . $borderStyle . '"><color rgb="' . $borderColor . '"/></right><top style="' . $borderStyle . '"><color rgb="' . $borderColor . '"/></top><bottom style="' . $borderStyle . '"><color rgb="' . $borderColor . '"/></bottom><diagonal/></border>';
+        return $xml . '</border>';
     }
 
     private function alignmentXml(mixed $alignment): string
     {
-        if ($alignment === null || $alignment === false) {
+        if ($alignment === null || $alignment === false || $alignment === []) {
+            return '';
+        }
+        if (is_string($alignment)) {
+            $alignment = ['horizontal' => $alignment];
+        }
+        if (!is_array($alignment)) {
             return '';
         }
 
-        $horizontal = 'center';
-        $vertical = 'center';
-        $wrap = false;
-
-        if (is_string($alignment)) {
-            $horizontal = $alignment;
-        } elseif (is_array($alignment)) {
-            $horizontal = (string) ($alignment['horizontal'] ?? $horizontal);
-            $vertical = (string) ($alignment['vertical'] ?? $vertical);
-            $wrap = (bool) ($alignment['wrap_text'] ?? $alignment['wrapText'] ?? false);
+        $attributes = [];
+        foreach (['horizontal', 'vertical'] as $key) {
+            if (isset($alignment[$key]) && $alignment[$key] !== '') {
+                $attributes[$key] = (string) $alignment[$key];
+            }
         }
-
-        $allowedHorizontal = ['left', 'center', 'right', 'justify'];
-        $allowedVertical = ['top', 'center', 'bottom'];
-        if (!in_array($horizontal, $allowedHorizontal, true)) {
-            $horizontal = 'center';
+        foreach (['wrap_text' => 'wrapText', 'shrink_to_fit' => 'shrinkToFit', 'justify_last_line' => 'justifyLastLine'] as $key => $attribute) {
+            if (array_key_exists($key, $alignment)) {
+                $attributes[$attribute] = (bool) $alignment[$key] ? '1' : '0';
+            }
         }
-        if (!in_array($vertical, $allowedVertical, true)) {
-            $vertical = 'center';
+        foreach (['text_rotation' => 'textRotation', 'indent' => 'indent', 'relative_indent' => 'relativeIndent', 'reading_order' => 'readingOrder'] as $key => $attribute) {
+            if (isset($alignment[$key]) && is_numeric($alignment[$key])) {
+                $attributes[$attribute] = (string) (int) $alignment[$key];
+            }
         }
+        return $attributes === [] ? '' : '<alignment' . $this->xmlAttributes($attributes) . '/>';
+    }
 
-        return '<alignment horizontal="' . $horizontal . '" vertical="' . $vertical . '"' . ($wrap ? ' wrapText="1"' : '') . '/>';
+    private function protectionXml(mixed $protection): string
+    {
+        if (!is_array($protection) || $protection === []) {
+            return '';
+        }
+        $attributes = [];
+        foreach (['locked', 'hidden'] as $key) {
+            if (array_key_exists($key, $protection)) {
+                $attributes[$key] = (bool) $protection[$key] ? '1' : '0';
+            }
+        }
+        return $attributes === [] ? '' : '<protection' . $this->xmlAttributes($attributes) . '/>';
+    }
+
+    private function colorElement(string $tag, mixed $color, string $fallback): string
+    {
+        if (is_string($color)) {
+            return '<' . $tag . ' rgb="' . $this->normalizeArgb($color, $fallback) . '"/>';
+        }
+        if (!is_array($color)) {
+            return '<' . $tag . ' rgb="' . $fallback . '"/>';
+        }
+        $attributes = [];
+        if (isset($color['rgb']) && is_string($color['rgb'])) {
+            $attributes['rgb'] = $this->normalizeArgb($color['rgb'], $fallback);
+        }
+        foreach (['indexed', 'theme', 'tint', 'auto'] as $key) {
+            if (array_key_exists($key, $color)) {
+                $attributes[$key] = is_bool($color[$key]) ? ($color[$key] ? '1' : '0') : (string) $color[$key];
+            }
+        }
+        if ($attributes === []) {
+            $attributes['rgb'] = $fallback;
+        }
+        return '<' . $tag . $this->xmlAttributes($attributes) . '/>';
     }
 
     /** @param array<string,int> $customFormats */

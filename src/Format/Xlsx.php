@@ -16,6 +16,8 @@ use Mnb\PHPExcel\Reader\XlsxMetadataReader;
 use Mnb\PHPExcel\Writer\XlsxWriter;
 use Mnb\PHPExcel\Writer\XlsxMetadataWriter;
 use Mnb\PHPExcel\Security\XlsxEncryption;
+use Mnb\PHPExcel\Snapshot\VisualSnapshot;
+use Mnb\PHPExcel\Reader\XlsxVisualSnapshotReader;
 
 final class Xlsx
 {
@@ -56,6 +58,54 @@ final class Xlsx
     public static function metaInfo(string $path, array $options = []): array
     {
         return (new XlsxMetadataReader())->metaInfo($path, $options);
+    }
+
+    /** @param array<string,mixed> $options @return array<string,mixed> */
+    public static function visualSnapshot(string $path, array $options = []): array
+    {
+        return (new XlsxVisualSnapshotReader())->visualSnapshot($path, $options);
+    }
+
+    /** @param array<string,mixed>|string $snapshot @param array<string,mixed> $options */
+    public static function createFromVisualSnapshot(array|string $snapshot, string $path, array $options = []): void
+    {
+        if (is_string($snapshot)) {
+            $snapshot = is_file($snapshot)
+                ? VisualSnapshot::fromJson((string) file_get_contents($snapshot))
+                : VisualSnapshot::fromJson($snapshot);
+        }
+        $workbook = VisualSnapshot::toWorkbookData($snapshot, $options);
+        $password = (string) ($options['password'] ?? $options['encryption_password'] ?? '');
+        if ($password !== '') {
+            $encryptionOptions = (array) ($options['encryption_options'] ?? []);
+            foreach (['mode', 'encryption_mode', 'compatibility_mode', 'spin_count'] as $key) {
+                if (array_key_exists($key, $options)) {
+                    $encryptionOptions[$key] = $options[$key];
+                }
+            }
+            $workbook->metadata['_mnb_xlsx_encryption'] = array_replace(
+                $encryptionOptions,
+                ['password' => $password]
+            );
+        }
+        $protectionPassword = (string) ($options['protection_password'] ?? '');
+        if ($protectionPassword !== '') {
+            if ((bool) ($options['protect_workbook'] ?? true)) {
+                $workbook->metadata['_mnb_workbook_protection'] = array_replace(
+                    (array) ($options['workbook_protection'] ?? []),
+                    ['password' => $protectionPassword]
+                );
+            }
+            if ((bool) ($options['protect_sheets'] ?? true)) {
+                $workbook->metadata['_mnb_sheet_protection'] = [
+                    '*' => array_replace(
+                        (array) ($options['sheet_protection'] ?? []),
+                        ['password' => $protectionPassword]
+                    ),
+                ];
+            }
+        }
+        (new XlsxWriter())->write($workbook, $path);
     }
 
     /** @param array<string,mixed> $changes @param array<string,mixed> $options */
