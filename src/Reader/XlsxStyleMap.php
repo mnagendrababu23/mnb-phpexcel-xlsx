@@ -180,7 +180,10 @@ final class XlsxStyleMap
         $borders = [];
         foreach ($matches as $borderMatch) {
             $borderXml = $borderMatch[0];
-            $border = $this->parseAttributes('<border ' . $borderMatch[1] . '>');
+            $border = [];
+            foreach ($this->parseAttributes('<border ' . $borderMatch[1] . '>') as $key => $value) {
+                $border[$this->snake($key)] = $this->scalar($value);
+            }
             foreach (['left', 'right', 'top', 'bottom', 'diagonal', 'vertical', 'horizontal', 'start', 'end'] as $side) {
                 if (preg_match('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . $side . '\b([^>]*)(?:\/>|>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?' . $side . '>)/is', $borderXml, $sideMatch) !== 1) {
                     continue;
@@ -211,7 +214,7 @@ final class XlsxStyleMap
             return [[], []];
         }
 
-        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?xf\b([^>]*)(?:\/>|>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?xf>)/is', $container, $matches, PREG_SET_ORDER);
+        preg_match_all('/<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?xf\b([^>]*?)(?:\/\s*>|>(.*?)<\/(?:[A-Za-z_][A-Za-z0-9_.-]*:)?xf\s*>)/is', $container, $matches, PREG_SET_ORDER);
         $numberFormats = [];
         $styles = [];
         foreach ($matches as $match) {
@@ -342,7 +345,7 @@ final class XlsxStyleMap
         $format = preg_replace('/"[^"]*"/', '', $format) ?? $format;
         $format = preg_replace('/\[[^\]]*\]/', '', $format) ?? $format;
         $format = str_replace(['\\', '_', '*'], '', $format);
-        return preg_match('/(^|[^a-z])([ymdhse]|am\/pm)([^a-z]|$)/', $format) === 1
+        return preg_match('/(^|[^a-z])(y+|m+|d+|h+|s+|am\/pm)([^a-z]|$)/', $format) === 1
             && preg_match('/[ymdhs]/', $format) === 1;
     }
 }
