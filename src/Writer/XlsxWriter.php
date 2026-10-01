@@ -1139,7 +1139,11 @@ final class XlsxWriter
         $pivotTables ??= [];
         $rowCount = count($sheet->rows);
         $columnCount = $this->maxColumnCount($sheet->rows);
-        $lastCell = $columnCount > 0 && $rowCount > 0 ? Coordinate::columnIndexToName($columnCount) . $rowCount : 'A1';
+        $columnNames = [];
+        for ($column = 1; $column <= $columnCount; $column++) {
+            $columnNames[$column] = Coordinate::columnIndexToName($column);
+        }
+        $lastCell = $columnCount > 0 && $rowCount > 0 ? $columnNames[$columnCount] . $rowCount : 'A1';
         $needsRelationships = $hasImages || $sheet->hyperlinks !== [] || $sheet->comments !== [] || $pivotTables !== [] || (is_array($preservedSheet) && (bool) ($preservedSheet['requires_relationships'] ?? false));
         $xmlnsR = $needsRelationships ? ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' : '';
 
@@ -1178,9 +1182,10 @@ final class XlsxWriter
             }
 
             $xml .= '<row' . $rowAttrs . '>';
-            foreach (array_values($row) as $columnIndex => $value) {
-                $c = $columnIndex + 1;
-                $cellRef = Coordinate::columnIndexToName($c) . $r;
+            $columnIndex = 0;
+            foreach ($row as $value) {
+                $c = ++$columnIndex;
+                $cellRef = $columnNames[$c] . $r;
                 $styleId = $this->styleIdFor(
                     $this->effectiveCellStyle($sheet, $r, $c, $cellRef, $value)
                 );

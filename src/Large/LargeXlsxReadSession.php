@@ -80,6 +80,61 @@ final class LargeXlsxReadSession
         return $clone;
     }
 
+    /** Optimize bulk data imports: cached formula values, no date-style loading unless explicitly re-enabled. */
+    public function fastMode(bool $enabled = true): self
+    {
+        $clone = clone $this;
+        $clone->options['performance_mode'] = $enabled ? 'fast' : 'auto';
+        if ($enabled) {
+            $clone->options['formula_cells'] = 'cached_value';
+            $clone->options['convert_dates'] = false;
+            $clone->options['read_data_only'] = true;
+        }
+        return $clone;
+    }
+
+    /** Use Excel's cached formula result without invoking a formula evaluator. */
+    public function cachedFormulaValues(bool $enabled = true): self
+    {
+        $clone = clone $this;
+        $clone->options['formula_cells'] = $enabled ? 'cached_value' : 'formula';
+        return $clone;
+    }
+
+    /** Resume a previous streaming import after the last successfully committed worksheet row. */
+    public function resumeAfterRow(int $rowNumber): self
+    {
+        $clone = clone $this;
+        $clone->options['start_after_row_number'] = max(0, $rowNumber);
+        return $clone;
+    }
+
+    /** Persist progress atomically so a queue/CLI job can resume after interruption. */
+    public function checkpointFile(string $path): self
+    {
+        if ($path === '') {
+            throw new \InvalidArgumentException('Checkpoint path cannot be empty.');
+        }
+        $clone = clone $this;
+        $existing = $clone->options['progress'] ?? null;
+        $clone->options['progress'] = static function (array $state) use ($path, $existing): void {
+            $dir = dirname($path);
+            if (!is_dir($dir) || !is_writable($dir)) {
+                throw new \RuntimeException('Checkpoint directory is not writable: ' . $dir);
+            }
+            $tmp = $path . '.tmp.' . getmypid();
+            $json = json_encode($state, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            if (file_put_contents($tmp, $json, LOCK_EX) === false || !@rename($tmp, $path)) {
+                @unlink($tmp);
+                throw new \RuntimeException('Unable to persist XLSX checkpoint: ' . $path);
+            }
+            if (is_callable($existing)) {
+                $existing($state);
+            }
+        };
+        return $clone;
+    }
+
     public function maxSharedStringsInMemory(int $count): self
     {
         $clone = clone $this;
