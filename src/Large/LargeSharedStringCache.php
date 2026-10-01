@@ -26,6 +26,7 @@ final class LargeSharedStringCache implements SharedStringProviderInterface
     private ?PDO $pdo = null;
     private ?string $sqlitePath = null;
     private ?\PDOStatement $insertStatement = null;
+    private ?\PDOStatement $selectStatement = null;
     private string $mode = 'none';
     private int $count = 0;
 
@@ -116,9 +117,9 @@ final class LargeSharedStringCache implements SharedStringProviderInterface
             return $this->memory[$index] ?? '';
         }
         if ($this->pdo !== null) {
-            $stmt = $this->pdo->prepare('SELECT value FROM shared_strings WHERE id = :id');
-            $stmt->execute([':id' => $index]);
-            $value = $stmt->fetchColumn();
+            $this->selectStatement ??= $this->pdo->prepare('SELECT value FROM shared_strings WHERE id = :id');
+            $this->selectStatement->execute([':id' => $index]);
+            $value = $this->selectStatement->fetchColumn();
             return is_string($value) ? $value : '';
         }
         return '';
@@ -137,6 +138,7 @@ final class LargeSharedStringCache implements SharedStringProviderInterface
     public function close(): void
     {
         $this->insertStatement = null;
+        $this->selectStatement = null;
         $this->pdo = null;
         if ($this->sqlitePath !== null && is_file($this->sqlitePath)) {
             @unlink($this->sqlitePath);

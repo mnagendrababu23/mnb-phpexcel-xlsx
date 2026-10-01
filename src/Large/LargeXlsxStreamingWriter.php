@@ -313,7 +313,7 @@ final class LargeXlsxStreamingWriter
         $handle = $sheet['handle'];
         $this->writeXml($handle, '<row r="' . $rowNumber . '">');
         $colIndex = 0;
-        foreach (array_values($values) as $value) {
+        foreach ($values as $value) {
             $colIndex++;
             if ($colIndex > self::EXCEL_MAX_COLUMNS) {
                 throw MnbExcelException::withCode('XLSX export exceeds Excel column limit.', ErrorCode::XLSX_WRITE_FAILED);
@@ -422,6 +422,8 @@ final class LargeXlsxStreamingWriter
         if (!is_resource($handle)) {
             throw MnbExcelException::withCode('Unable to create temporary sheet XML: ' . $sheetPath, ErrorCode::FILE_WRITE_FAILED);
         }
+        // Reduce syscall overhead for large exports while keeping worksheet XML streaming.
+        stream_set_write_buffer($handle, max(65536, (int) ($options['xml_write_buffer_bytes'] ?? 1048576)));
         $this->writeXml($handle, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
         $this->writeXml($handle, '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">');
         if (($options['freeze_header'] ?? true) !== false && ($options['with_header'] ?? true)) {
