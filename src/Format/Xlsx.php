@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mnb\PHPExcel\Format;
 
+use Mnb\PHPExcel\Cloud\CloudAccess;
 use Mnb\PHPExcel\Metadata\MetadataFacade;
 use Mnb\PHPExcel\Core\RichText;
 use Mnb\PHPExcel\Template\XlsxImportTemplateFactory;
@@ -22,6 +23,7 @@ use Mnb\PHPExcel\Reader\XlsxVisualSnapshotReader;
 
 final class Xlsx
 {
+    use CloudAccess;
     /** Developer-friendly lazy metadata API. */
     public static function meta(string $path, array $options = []): MetadataFacade
     {
